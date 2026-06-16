@@ -85,7 +85,8 @@
           spec:
             containers:
               - name: minio
-                image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+                image: "{{ goat_addon_software.images.minio.registry }}/{{ goat_addon_software.images.minio.repository }}:{{ goat_addon_software.images.minio.tag }}"
+                imagePullPolicy: "{{ goat_addon_software.images.minio.pullPolicy | default('IfNotPresent') }}"
                 args: ["server", "--console-address", ":9001", "/data/s3"]
                 ports:
                   - { name: api, containerPort: 9000 }
@@ -164,7 +165,8 @@
             restartPolicy: OnFailure
             containers:
               - name: mc
-                image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+                image: "{{ goat_addon_software.images.minio_mc.registry }}/{{ goat_addon_software.images.minio_mc.repository }}:{{ goat_addon_software.images.minio_mc.tag }}"
+                imagePullPolicy: "{{ goat_addon_software.images.minio_mc.pullPolicy | default('IfNotPresent') }}"
                 env:
                   - name: MC_ACCESS_KEY
                     valueFrom:
@@ -287,7 +289,8 @@
             restartPolicy: OnFailure
             containers:
               - name: init
-                image: python:3.11-slim
+                image: "{{ goat_addon_software.images.ducklake_init.registry }}/{{ goat_addon_software.images.ducklake_init.repository }}:{{ goat_addon_software.images.ducklake_init.tag }}"
+                imagePullPolicy: "{{ goat_addon_software.images.ducklake_init.pullPolicy | default('IfNotPresent') }}"
                 env:
                   - name: PG_HOST
                     value: "{{ goat_addon.db.central_db_name }}.{{ goat_addon.db.central_db_ns }}.svc.cluster.local"

@@ -1,5 +1,80 @@
 # /home/p4b/civitas-goat-addon/vars/software_references.yml
+#
+# Single source of truth for every image and helm artifact this addon spins
+# up. Civitas-core's image-mirror tooling enumerates these and pushes them
+# into a private registry in air-gapped / customer-managed deployments
+# (e.g. Bonn). Override `registry:` per image via inventory to point at a
+# mirror without touching the chart itself.
 ---
 goat_addon_software:
-  chart_version: "0.3.0"
-  app_version_pin: ""
+
+  # ── Helm chart we install ──────────────────────────────────────────────
+  helm_chart_name: goat
+  helm_release_name: goat
+  helm_repo_url: oci://ghcr.io/plan4better/charts
+  helm_chart_version: "0.3.6"
+
+  # ── Container images ────────────────────────────────────────────────────
+  # Each entry maps to a Deployment / Job that this addon (directly or via
+  # the chart) creates. Mirror-friendly: change `registry` to point at a
+  # private registry copy.
+  images:
+
+    # Chart-deployed services. Passed through to the helm values via
+    # templates/goat-values.yaml.j2 → consumed by the chart's per-service
+    # `<svc>.image.{registry,repository,tag,pullPolicy}` blocks.
+    core:
+      registry: ghcr.io
+      repository: plan4better/goat/core
+      tag: latest
+      pullPolicy: IfNotPresent
+    web:
+      registry: ghcr.io
+      repository: plan4better/goat/web
+      tag: latest
+      pullPolicy: IfNotPresent
+    geoapi:
+      registry: ghcr.io
+      repository: plan4better/goat/geoapi
+      tag: latest
+      pullPolicy: IfNotPresent
+    processes:
+      registry: ghcr.io
+      repository: plan4better/goat/processes
+      tag: latest
+      pullPolicy: IfNotPresent
+    windmill_server:
+      registry: ghcr.io
+      repository: plan4better/goat/windmill-server
+      tag: latest
+      pullPolicy: IfNotPresent
+    windmill_worker_default:
+      registry: ghcr.io
+      repository: plan4better/goat/windmill-worker-default
+      tag: latest
+      pullPolicy: IfNotPresent
+
+    # Bundled redis (Bitnami sub-chart). Free Bitnami images moved to
+    # bitnamilegacy in Aug 2025 — see chart README for context.
+    redis:
+      registry: docker.io
+      repository: bitnamilegacy/redis
+      tag: "8.0.2"
+      pullPolicy: IfNotPresent
+
+    # Addon-deployed (not via the chart). 05_minio.yml renders these.
+    minio:
+      registry: quay.io
+      repository: minio/minio
+      tag: RELEASE.2025-09-07T16-13-09Z
+      pullPolicy: IfNotPresent
+    minio_mc:
+      registry: quay.io
+      repository: minio/mc
+      tag: RELEASE.2025-08-13T08-35-41Z
+      pullPolicy: IfNotPresent
+    ducklake_init:
+      registry: docker.io
+      repository: library/python
+      tag: "3.11-slim"
+      pullPolicy: IfNotPresent

@@ -19,8 +19,30 @@ global:
     civitas.core/owner: goat-addon
     civitas.core/env: "{{ ENVIRONMENT }}"
 
+{#-
+  Image refs are sourced from vars/software_references.yml so civitas-core's
+  image-mirror tooling can enumerate and pre-mirror every image this addon
+  spins up. Override `registry:` in the inventory's
+  `goat_addon_software.images.<svc>` block to point at a private mirror.
+
+  The macro renders an `image:` block already indented to be a 2-space
+  child of a top-level chart key (core, web, geoapi, etc.); usage:
+
+      core:
+        enabled: true
+        {{ img('core') }}
+#}
+{%- macro img(svc) -%}
+image:
+    registry: "{{ goat_addon_software.images[svc].registry }}"
+    repository: "{{ goat_addon_software.images[svc].repository }}"
+    tag: "{{ goat_addon_software.images[svc].tag }}"
+    pullPolicy: "{{ goat_addon_software.images[svc].pullPolicy | default('IfNotPresent') }}"
+{%- endmacro %}
+
 core:
   enabled: true
+  {{ img('core') }}
   # goat-web's bundle calls the core API from the browser directly
   # (NEXT_PUBLIC_API_URL is baked in), so core must be reachable externally.
   ingress:
@@ -39,12 +61,22 @@ core:
       - secretName: "goat-core-{{ DOMAIN }}-tls"
         hosts:
           - "{{ core_host }}"
+  # NB: AUTH must be disabled on goat-core until plan4better's accounts→core
+  # merge ships. goat-core's per-request authorization calls a SQL function
+  # `accounts.authorization(...)` that lives in a separate, closed-source
+  # accounts service — not shipped with OSS goat. With AUTH=true every
+  # authenticated request 401s ("function does not exist"). The intended OSS
+  # mode is AUTH=false: goat-core uses a hardcoded DEFAULT_USER_ID and serves
+  # all data as the "GOAT Admin" identity. goat-web's NextAuth still gates
+  # UI sign-in through civitas's Keycloak realm — only API-level per-user
+  # authorization is deferred. See goat/docs/merge-accounts-into-core.md.
   auth:
-    enabled: true
-    existingSecret: goat-keycloak-creds   # created by 02_keycloak_client.yml
+    enabled: false
+    existingSecret: goat-keycloak-creds   # still referenced by chart wiring
 
 geoapi:
   enabled: true
+  {{ img('geoapi') }}
   config:
     ENVIRONMENT: prod
     DUCKLAKE_CREATE_IF_NOT_EXISTS: "true"
@@ -118,6 +150,7 @@ geoapi:
 # Wire the rest to the same Postgres / MinIO / Keycloak / CA bundle as geoapi.
 processes:
   enabled: true
+  {{ img('processes') }}
   config:
     ENVIRONMENT: prod
     AUTH: "true"
@@ -193,6 +226,7 @@ processes:
 
 web:
   enabled: true
+  {{ img('web') }}
   auth:
     enabled: true
     existingSecret: goat-keycloak-creds
@@ -272,6 +306,12 @@ postgresql:
 
 redis:
   enabled: true          # bundled — light dep, fine inside civitas
+  # Bitnami's free images moved to `bitnamilegacy` registry in Aug 2025;
+  # reference goes through software_references.yml for mirror-friendliness.
+  image:
+    registry: "{{ goat_addon_software.images.redis.registry }}"
+    repository: "{{ goat_addon_software.images.redis.repository }}"
+    tag: "{{ goat_addon_software.images.redis.tag }}"
 
 # Windmill: server + the lightweight `default` worker. `print`/`tools`/
 # `workflows` workers stay off — they require tainted `node.kubernetes.io/
@@ -298,6 +338,11 @@ windmill:
     enabled: true
   server:
     enabled: true
+    image:
+      registry: "{{ goat_addon_software.images.windmill_server.registry }}"
+      repository: "{{ goat_addon_software.images.windmill_server.repository }}"
+      tag: "{{ goat_addon_software.images.windmill_server.tag }}"
+      pullPolicy: "{{ goat_addon_software.images.windmill_server.pullPolicy | default('IfNotPresent') }}"
     # BASE_URL drives windmill's outbound links (emails, webhooks, the
     # `Open in Windmill` button). Set it to the public URL so links work
     # outside the cluster.
@@ -323,6 +368,11 @@ windmill:
   workers:
     default:
       enabled: true
+      image:
+        registry: "{{ goat_addon_software.images.windmill_worker_default.registry }}"
+        repository: "{{ goat_addon_software.images.windmill_worker_default.repository }}"
+        tag: "{{ goat_addon_software.images.windmill_worker_default.tag }}"
+        pullPolicy: "{{ goat_addon_software.images.windmill_worker_default.pullPolicy | default('IfNotPresent') }}"
     print:
       enabled: false
     tools:

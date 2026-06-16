@@ -95,6 +95,35 @@ ok: [localhost] => {
 
 Addon version is independent of civitas-core's. Tag the addon based on its own semver; consult this table for compatibility.
 
+## Image references (mirror-friendly)
+
+Every container image this addon spins up — both the chart-deployed services
+and addon-deployed ones (MinIO, mc, the DuckLake init Job) — is enumerated
+in `vars/software_references.yml` under `goat_addon_software.images.*`.
+The values flow into the rendered helm values + the Ansible task
+manifests, so the chart's hardcoded defaults are always overridden from a
+single source of truth.
+
+This matches civitas-core's convention so air-gapped / private-registry
+operators can enumerate every image with one read of that file:
+
+```sh
+yq '.goat_addon_software.images[] | "\(.registry)/\(.repository):\(.tag)"' \
+   vars/software_references.yml
+```
+
+To pin a private mirror, override `registry:` per image in your inventory:
+
+```yaml
+inv_addons:
+  goat:
+    software_references:
+      images:
+        core:  { registry: registry.example.local }
+        web:   { registry: registry.example.local }
+        # …
+```
+
 ## Known caveats
 
 - **Postgres-operator stale-password**: if civitas's Zalando postgres-operator has lost its in-memory state (k8s secret rotated but DB password unchanged), `01_db.yml` will hang waiting for the goat secret to appear. Restart the operator and retry:
