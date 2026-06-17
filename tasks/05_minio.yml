@@ -9,6 +9,36 @@
 # Mirrors plan4better's compose.yaml topology (quay.io/minio images).
 # Single-replica + PVC = fine for local/dev; not HA, not for prod scale.
 
+# Shared DuckLake data volume. layer_import (worker-tools) writes parquet
+# under /app/data/ducklake/...; geoapi reads it for tile serving. Both must
+# see the same files — hence one PVC mounted on tools/workflows/geoapi via
+# the chart's existingClaim wiring + extraVolumes (goat-values.yaml.j2).
+#
+# Storage class: inv_k8s.storage_class.rwx — production clusters set this to
+# a real RWX class (NFS / Longhorn). Civitas's default `local-path` is
+# RWO-only; multi-pod sharing relies on all data-touching pods co-scheduling
+# on the same node (see README "Known caveats"). Switch the operator's
+# storage class for production HA.
+- name: "GOAT addon: create shared DuckLake data PVC"
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ KUBECONFIG | default(lookup('env', 'KUBECONFIG')) | default(lookup('env', 'HOME') + '/.kube/config') }}"
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: goat-ducklake-data
+        namespace: "{{ goat_addon.namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: civitas-goat-addon
+      spec:
+        accessModes:
+          - ReadWriteMany
+        storageClassName: "{{ inv_k8s.storage_class.rwx }}"
+        resources:
+          requests:
+            storage: "{{ goat_addon.ducklake.pvc_size | default('20Gi') }}"
+
 - name: "GOAT addon: generate or reuse MinIO root credentials"
   block:
     - name: "GOAT addon: check for existing minio-credentials secret"

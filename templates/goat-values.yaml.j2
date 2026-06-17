@@ -143,10 +143,19 @@ geoapi:
       configMap:
         name: civitas-ca
         optional: true
+    # Shared DuckLake data dir: layer_import (worker-tools) writes parquet
+    # here, geoapi reads it for tile serving. Both pods must see the same
+    # files — hence a single RWX PVC (provisioned by tasks/07_ducklake_pvc.yml
+    # via inv_k8s.storage_class.rwx).
+    - name: ducklake-data
+      persistentVolumeClaim:
+        claimName: goat-ducklake-data
   extraVolumeMounts:
     - name: civitas-ca
       mountPath: /etc/ssl/civitas
       readOnly: true
+    - name: ducklake-data
+      mountPath: /app/data
   ingress:
     enabled: true
     className: "{{ inv_k8s.ingress_class }}"
@@ -416,6 +425,14 @@ windmill:
       # Override chart default `node.kubernetes.io/server-usage: geodata`
       # which civitas's local clusters don't carry.
       nodeSelector: {}
+      tolerations: []
+      # Mount the shared DuckLake PVC so writes here are visible to geoapi
+      # (and workflows). Provisioned by 05_minio.yml as `goat-ducklake-data`
+      # against inv_k8s.storage_class.rwx — RWX in production, local-path
+      # with same-node co-scheduling in dev.
+      persistence:
+        enabled: true
+        existingClaim: goat-ducklake-data
       config:
         MODE: "worker"
         WORKER_GROUP: "tools"
@@ -453,6 +470,10 @@ windmill:
         tag: "{{ goat_addon_software.images.windmill_worker_tools.tag }}"
         pullPolicy: "{{ goat_addon_software.images.windmill_worker_tools.pullPolicy | default('IfNotPresent') }}"
       nodeSelector: {}
+      tolerations: []
+      persistence:
+        enabled: true
+        existingClaim: goat-ducklake-data
       config:
         MODE: "worker"
         WORKER_GROUP: "workflows"
