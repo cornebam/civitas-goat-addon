@@ -12,7 +12,7 @@ goat_addon_software:
   helm_chart_name: goat
   helm_release_name: goat
   helm_repo_url: oci://ghcr.io/plan4better/charts
-  helm_chart_version: "0.3.6"
+  helm_chart_version: "0.3.7"
 
   # ── Container images ────────────────────────────────────────────────────
   # Each entry maps to a Deployment / Job that this addon (directly or via
@@ -26,7 +26,7 @@ goat_addon_software:
     core:
       registry: ghcr.io
       repository: plan4better/goat/core
-      tag: latest
+      tag: ecc99e2
       pullPolicy: IfNotPresent
     web:
       registry: ghcr.io
@@ -51,6 +51,23 @@ goat_addon_software:
     windmill_worker_default:
       registry: ghcr.io
       repository: plan4better/goat/windmill-worker-default
+      tag: latest
+      pullPolicy: IfNotPresent
+    # Heavier worker image (goatlib + geospatial deps) used by both `tools`
+    # and `workflows` worker pods — the chart shares one image between them.
+    # NB: pinned to v2.4.36 because v2.4.37 (and the `:latest` tag, which
+    # points at v2.4.37) ship a 0-byte windmill binary that crashes at
+    # startup with `exec format error`. v2.4.36 is the most recent build
+    # that boots cleanly. Bump once upstream republishes a working `:latest`.
+    windmill_worker_tools:
+      registry: ghcr.io
+      repository: plan4better/goat/windmill-worker-tools
+      tag: v2.4.36
+      pullPolicy: IfNotPresent
+    # Chromium-based PDF/atlas generation worker.
+    windmill_worker_print:
+      registry: ghcr.io
+      repository: plan4better/goat/windmill-worker-print
       tag: latest
       pullPolicy: IfNotPresent
 

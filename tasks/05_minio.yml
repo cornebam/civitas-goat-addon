@@ -123,6 +123,48 @@
           - { name: api, port: 9000, targetPort: 9000 }
           - { name: console, port: 9001, targetPort: 9001 }
 
+# Expose MinIO over HTTPS for browser-side uploads. Goat-core returns
+# presigned S3 URLs that the SPA fetches directly — they MUST be HTTPS,
+# or Chrome mixed-content-blocks them. The hostname mirrors the per-service
+# subdomain convention (s3.<goat-host>) and gets a civitas-CA-signed cert
+# via cert-manager so the browser trusts it without prompting.
+- name: "GOAT addon: deploy MinIO public ingress (for browser uploads)"
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ KUBECONFIG | default(lookup('env', 'KUBECONFIG')) | default(lookup('env', 'HOME') + '/.kube/config') }}"
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: minio
+        namespace: "{{ goat_addon.namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: civitas-goat-addon
+        annotations:
+          cert-manager.io/cluster-issuer: "{{ inv_k8s.cert_manager.issuer_name }}"
+          kubernetes.io/ingress.class: "{{ inv_k8s.ingress_class }}"
+          nginx.ingress.kubernetes.io/ssl-redirect: "true"
+          # Datasets can be large; lift the 1 MB default and the 60s timeout.
+          nginx.ingress.kubernetes.io/proxy-body-size: "5g"
+          nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+          nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+      spec:
+        ingressClassName: "{{ inv_k8s.ingress_class }}"
+        tls:
+          - hosts:
+              - "s3.goat.{{ DOMAIN }}"
+            secretName: "minio-s3-{{ DOMAIN }}-tls"
+        rules:
+          - host: "s3.goat.{{ DOMAIN }}"
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: minio
+                      port: { number: 9000 }
+
 - name: "GOAT addon: wait for MinIO to be ready"
   kubernetes.core.k8s_info:
     api_version: apps/v1

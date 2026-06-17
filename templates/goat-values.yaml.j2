@@ -8,6 +8,7 @@
 {%- set geoapi_host = 'geoapi.' + goat_host %}
 {%- set processes_host = 'processes.' + goat_host %}
 {%- set windmill_host = 'windmill.' + goat_host %}
+{%- set s3_host = 's3.' + goat_host %}
 
 global:
   # inv_k8s.storage_class is a DICT in civitas-core ({loc, rwo, rwx}); the
@@ -73,6 +74,27 @@ core:
   auth:
     enabled: false
     existingSecret: goat-keycloak-creds   # still referenced by chart wiring
+  # Chart ships placeholder S3 values under core.config that leak through if
+  # we don't override them. Goat-core needs both:
+  #   - S3_ENDPOINT_URL        — used by boto3 in-cluster (HTTP, internal)
+  #   - S3_PUBLIC_ENDPOINT_URL — substituted into presigned URLs returned to
+  #     the browser; must be HTTPS so the SPA's fetch isn't mixed-content
+  #     blocked. See goat/apps/core/src/core/services/s3.py.
+  config:
+    ENVIRONMENT: prod
+    S3_PROVIDER: "minio"
+    S3_ENDPOINT_URL: "http://minio.{{ goat_addon.namespace }}.svc.cluster.local:9000"
+    S3_PUBLIC_ENDPOINT_URL: "https://{{ s3_host }}"
+    S3_REGION: "us-east-1"
+    S3_BUCKET_NAME: "{{ goat_addon.minio.bucket }}"
+    S3_FORCE_PATH_STYLE: "true"
+  extraEnv:
+    - name: S3_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef: { name: minio-credentials, key: access_key }
+    - name: S3_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef: { name: minio-credentials, key: secret_key }
 
 geoapi:
   enabled: true
@@ -243,15 +265,17 @@ web:
       value: "https://{{ core_host }}"
     - name: NEXT_PUBLIC_APP_URL
       value: "{{ goat_addon.web.public_url }}"
-    # GEOAPI_URL + PROCESSES_URL wired to real backends. ACCOUNTS_API_URL is
-    # parked — accounts service not deployed; bundle calls `new URL()` on it
-    # at module-load time so the value must still be a valid absolute URL.
     - name: NEXT_PUBLIC_GEOAPI_URL
       value: "https://{{ geoapi_host }}"
     - name: NEXT_PUBLIC_PROCESSES_URL
       value: "https://{{ processes_host }}"
+    # Empty NEXT_PUBLIC_ACCOUNTS_API_URL puts the bundle into OSS / disabled
+    # mode: `ACCOUNTS_ENABLED = Boolean(NEXT_PUBLIC_ACCOUNTS_API_URL)` flips
+    # to false, hooks short-circuit to stub data instead of looping cert
+    # errors against a non-existent accounts.{domain} host. The `new URL()`
+    # construction is guarded by ACCOUNTS_ENABLED so empty is safe.
     - name: NEXT_PUBLIC_ACCOUNTS_API_URL
-      value: "https://accounts.{{ goat_host }}"
+      value: ""
     - name: NEXT_PUBLIC_ACCOUNTS_DISABLED
       value: "true"
   extraVolumes:
@@ -313,10 +337,10 @@ redis:
     repository: "{{ goat_addon_software.images.redis.repository }}"
     tag: "{{ goat_addon_software.images.redis.tag }}"
 
-# Windmill: server + the lightweight `default` worker. `print`/`tools`/
-# `workflows` workers stay off — they require tainted `node.kubernetes.io/
-# server-usage: geodata` nodes + 200Gi PVCs that local civitas clusters
-# don't have. Bootstrapped (workspace + API token) by 06_windmill.yml.
+# Windmill: server + four workers (default, tools, workflows, print). The
+# chart's default `nodeSelector: { server-usage: geodata }` on tools/workflows
+# is cleared here — civitas's local clusters don't carry that taint. Bootstrap
+# (workspace + API token) is a chart post-install hook.
 #
 # Dedicated `windmill` database provisioned by 01b_windmill_db.yml — we do
 # NOT share the goat DB (windmill's migrations write ~100 tables and need
@@ -365,6 +389,12 @@ windmill:
         - secretName: "goat-windmill-server-{{ DOMAIN }}-tls"
           hosts:
             - "{{ windmill_host }}"
+  # Each goatlib-running worker (tools/workflows/print) needs the application
+  # DB + S3 + DuckLake config on its env. We rely on chart v0.3.7's renamed
+  # internal vars (_WMILL_DB_*) leaving the POSTGRES_* namespace free for
+  # the goat DB; and on WHITELIST_ENVS in each worker's config so windmill
+  # exposes the env to user scripts at runtime. Non-sensitive values go in
+  # `config:` (configmap envFrom); secret refs go in `extraEnv:`.
   workers:
     default:
       enabled: true
@@ -373,12 +403,93 @@ windmill:
         repository: "{{ goat_addon_software.images.windmill_worker_default.repository }}"
         tag: "{{ goat_addon_software.images.windmill_worker_default.tag }}"
         pullPolicy: "{{ goat_addon_software.images.windmill_worker_default.pullPolicy | default('IfNotPresent') }}"
-    print:
-      enabled: false
+    # `tools` and `workflows` share the windmill-worker-tools image — heavier
+    # (goatlib + geospatial deps). They run python scripts that import
+    # goatlib, which the default worker image doesn't ship.
     tools:
-      enabled: false
+      enabled: true
+      image:
+        registry: "{{ goat_addon_software.images.windmill_worker_tools.registry }}"
+        repository: "{{ goat_addon_software.images.windmill_worker_tools.repository }}"
+        tag: "{{ goat_addon_software.images.windmill_worker_tools.tag }}"
+        pullPolicy: "{{ goat_addon_software.images.windmill_worker_tools.pullPolicy | default('IfNotPresent') }}"
+      # Override chart default `node.kubernetes.io/server-usage: geodata`
+      # which civitas's local clusters don't carry.
+      nodeSelector: {}
+      config:
+        MODE: "worker"
+        WORKER_GROUP: "tools"
+        WORKER_TAGS: "tools"
+        WHITELIST_ENVS: "POSTGRES_SERVER,POSTGRES_PORT,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,S3_PROVIDER,S3_ENDPOINT_URL,S3_PUBLIC_ENDPOINT_URL,S3_REGION,S3_BUCKET_NAME,S3_ACCESS_KEY_ID,S3_SECRET_ACCESS_KEY,DUCKLAKE_CATALOG_SCHEMA,DUCKLAKE_DATA_DIR,CUSTOMER_SCHEMA"
+        POSTGRES_SERVER: "{{ goat_addon.db.central_db_name }}.{{ goat_addon.db.central_db_ns }}.svc.cluster.local"
+        POSTGRES_PORT: "5432"
+        POSTGRES_DB: "{{ goat_addon.db.goat_db_name }}"
+        S3_PROVIDER: "minio"
+        S3_ENDPOINT_URL: "http://minio.{{ goat_addon.namespace }}.svc.cluster.local:9000"
+        S3_PUBLIC_ENDPOINT_URL: "https://{{ s3_host }}"
+        S3_REGION: "us-east-1"
+        S3_BUCKET_NAME: "{{ goat_addon.minio.bucket }}"
+        DUCKLAKE_CATALOG_SCHEMA: "ducklake"
+        DUCKLAKE_DATA_DIR: "/app/data/ducklake"
+        CUSTOMER_SCHEMA: "customer"
+      extraEnv:
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef: { name: goat-postgres-creds, key: username }
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef: { name: goat-postgres-creds, key: password }
+        - name: S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef: { name: minio-credentials, key: access_key }
+        - name: S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef: { name: minio-credentials, key: secret_key }
     workflows:
-      enabled: false
+      enabled: true
+      image:
+        registry: "{{ goat_addon_software.images.windmill_worker_tools.registry }}"
+        repository: "{{ goat_addon_software.images.windmill_worker_tools.repository }}"
+        tag: "{{ goat_addon_software.images.windmill_worker_tools.tag }}"
+        pullPolicy: "{{ goat_addon_software.images.windmill_worker_tools.pullPolicy | default('IfNotPresent') }}"
+      nodeSelector: {}
+      config:
+        MODE: "worker"
+        WORKER_GROUP: "workflows"
+        WORKER_TAGS: "workflows"
+        WHITELIST_ENVS: "POSTGRES_SERVER,POSTGRES_PORT,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,S3_PROVIDER,S3_ENDPOINT_URL,S3_PUBLIC_ENDPOINT_URL,S3_REGION,S3_BUCKET_NAME,S3_ACCESS_KEY_ID,S3_SECRET_ACCESS_KEY,DUCKLAKE_CATALOG_SCHEMA,DUCKLAKE_DATA_DIR,CUSTOMER_SCHEMA"
+        POSTGRES_SERVER: "{{ goat_addon.db.central_db_name }}.{{ goat_addon.db.central_db_ns }}.svc.cluster.local"
+        POSTGRES_PORT: "5432"
+        POSTGRES_DB: "{{ goat_addon.db.goat_db_name }}"
+        S3_PROVIDER: "minio"
+        S3_ENDPOINT_URL: "http://minio.{{ goat_addon.namespace }}.svc.cluster.local:9000"
+        S3_PUBLIC_ENDPOINT_URL: "https://{{ s3_host }}"
+        S3_REGION: "us-east-1"
+        S3_BUCKET_NAME: "{{ goat_addon.minio.bucket }}"
+        DUCKLAKE_CATALOG_SCHEMA: "ducklake"
+        DUCKLAKE_DATA_DIR: "/app/data/ducklake"
+        CUSTOMER_SCHEMA: "customer"
+      extraEnv:
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef: { name: goat-postgres-creds, key: username }
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef: { name: goat-postgres-creds, key: password }
+        - name: S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef: { name: minio-credentials, key: access_key }
+        - name: S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef: { name: minio-credentials, key: secret_key }
+    print:
+      enabled: true
+      image:
+        registry: "{{ goat_addon_software.images.windmill_worker_print.registry }}"
+        repository: "{{ goat_addon_software.images.windmill_worker_print.repository }}"
+        tag: "{{ goat_addon_software.images.windmill_worker_print.tag }}"
+        pullPolicy: "{{ goat_addon_software.images.windmill_worker_print.pullPolicy | default('IfNotPresent') }}"
+      nodeSelector: {}
 
 caddy:
   enabled: false         # goat-web has its own Ingress (above) — no proxy needed

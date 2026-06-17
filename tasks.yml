@@ -42,6 +42,14 @@
 # writes the token to K8s Secret `<release>-windmill-token` which
 # goat-values.yaml.j2 wires into the processes deployment.
 
+- name: GOAT addon — migrate goat-core DB (alembic + initial_data)
+  ansible.builtin.import_tasks: "{{ playbook_dir }}/addons/goat_addon/tasks/04_core_migrate.yml"
+  tags: ["goat_addon"]
+
+# Windmill workspace variables (POSTGRES_*, S3_*, ...) are now seeded by the
+# chart's `windmill-variables` post-install hook (chart v0.3.7+). See
+# `windmill.bootstrap.variables` in templates/goat-values.yaml.j2.
+
 - name: GOAT addon — health check
   ansible.builtin.import_tasks: "{{ playbook_dir }}/addons/goat_addon/tasks/99_health_check.yml"
   tags: ["goat_addon"]
