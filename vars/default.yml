@@ -29,6 +29,12 @@ goat_addon:
   minio:
     # MinIO bucket name. DuckLake parquet files + uploaded assets land here.
     bucket: "{{ inv_addons.goat.minio.bucket | default('goat') }}"
+  ducklake:
+    pvc_size: "{{ inv_addons.goat.ducklake.pvc_size | default('20Gi') }}"
+    # RWX for real multi-node clusters; local-path (k3d/k3s default) cannot
+    # provision RWX — set ReadWriteOnce there (sharing then relies on
+    # co-scheduling, see README).
+    pvc_access_mode: "{{ inv_addons.goat.ducklake.pvc_access_mode | default('ReadWriteMany') }}"
   # Windmill workspace + admin password rotation are handled by the chart
   # itself (post-install hook, since chart v0.3.4). The addon doesn't need
   # any windmill-app config — just point processes at the chart-managed

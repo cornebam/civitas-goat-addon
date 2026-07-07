@@ -12,7 +12,7 @@ goat_addon_software:
   helm_chart_name: goat
   helm_release_name: goat
   helm_repo_url: oci://ghcr.io/plan4better/charts
-  helm_chart_version: "0.3.7"
+  helm_chart_version: "0.4.0"
 
   # ── Container images ────────────────────────────────────────────────────
   # Each entry maps to a Deployment / Job that this addon (directly or via
@@ -26,12 +26,12 @@ goat_addon_software:
     core:
       registry: ghcr.io
       repository: plan4better/goat/core
-      tag: ecc99e2
+      tag: f59d1e3
       pullPolicy: IfNotPresent
     web:
       registry: ghcr.io
       repository: plan4better/goat/web
-      tag: latest
+      tag: f59d1e3
       pullPolicy: IfNotPresent
     geoapi:
       registry: ghcr.io

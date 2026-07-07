@@ -33,7 +33,10 @@
           app.kubernetes.io/managed-by: civitas-goat-addon
       spec:
         accessModes:
-          - ReadWriteMany
+          # RWX for real multi-node clusters; local-path (k3d/k3s default)
+          # cannot provision RWX — set pvc_access_mode: ReadWriteOnce there
+          # (sharing then relies on co-scheduling, see README).
+          - "{{ goat_addon.ducklake.pvc_access_mode | default('ReadWriteMany') }}"
         storageClassName: "{{ inv_k8s.storage_class.rwx }}"
         resources:
           requests:

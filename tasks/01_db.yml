@@ -20,8 +20,8 @@
 #     (`schemas: public: defaultRoles: false`) and pin the owner role's
 #     in-DB search_path to `public`.
 
-# Goat seeds ~40 tables across 5 schemas (accounts, customer, basic, temporal,
-# user_data) and runs concurrent queries from goat-core, geoapi, processes and
+# Goat seeds ~40 tables (customer/basic/temporal schemas + the ducklake
+# catalog) and runs concurrent queries from goat-core, geoapi, processes and
 # windmill against the same DB. The historical civitas default of 500Mi memory
 # was sized for the bare platform and OOM-loops the postgres master once goat
 # is layered on. Fail fast here with a clear pointer to inv_central_db.resources
@@ -176,7 +176,7 @@
       kubectl -n {{ goat_addon.db.central_db_ns }}
       exec {{ central_db_master.resources[0].metadata.name }} -c postgres --
       psql -U postgres -d {{ goat_addon.db.goat_db_name }} -v ON_ERROR_STOP=1 -c
-      "ALTER ROLE {{ goat_addon.db.goat_db_name }}_owner_user IN DATABASE {{ goat_addon.db.goat_db_name }} SET search_path = data, public, extensions;"
+      "ALTER ROLE {{ goat_addon.db.goat_db_name }}_owner_user IN DATABASE {{ goat_addon.db.goat_db_name }} SET search_path = data, public, extensions; GRANT USAGE ON SCHEMA extensions TO PUBLIC;"
   changed_when: false
 
 - name: "Set up windmill prereqs (roles, search_path, drop stray `data` schema)"

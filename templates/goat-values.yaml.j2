@@ -62,18 +62,17 @@ core:
       - secretName: "goat-core-{{ DOMAIN }}-tls"
         hosts:
           - "{{ core_host }}"
-  # NB: AUTH must be disabled on goat-core until plan4better's accounts→core
-  # merge ships. goat-core's per-request authorization calls a SQL function
-  # `accounts.authorization(...)` that lives in a separate, closed-source
-  # accounts service — not shipped with OSS goat. With AUTH=true every
-  # authenticated request 401s ("function does not exist"). The intended OSS
-  # mode is AUTH=false: goat-core uses a hardcoded DEFAULT_USER_ID and serves
-  # all data as the "GOAT Admin" identity. goat-web's NextAuth still gates
-  # UI sign-in through civitas's Keycloak realm — only API-level per-user
-  # authorization is deferred. See goat/docs/merge-accounts-into-core.md.
+  # AUTH=false: goat-core serves all data as the single default identity
+  # (seeded by the chart's migrate hook); goat-web's NextAuth still gates
+  # UI sign-in through civitas's Keycloak realm. Flipping this to true
+  # switches civitas to real multi-user mode — users onboard their own
+  # organization on first login, API-level permissions are enforced —
+  # and additionally needs the Keycloak client's service account enabled
+  # with the realm `view-users` role (user profile enrichment). Deliberate
+  # product decision per tenant, not a config detail.
   auth:
     enabled: false
-    existingSecret: goat-keycloak-creds   # still referenced by chart wiring
+    existingSecret: goat-keycloak-creds
   # Chart ships placeholder S3 values under core.config that leak through if
   # we don't override them. Goat-core needs both:
   #   - S3_ENDPOINT_URL        — used by boto3 in-cluster (HTTP, internal)
@@ -278,15 +277,6 @@ web:
       value: "https://{{ geoapi_host }}"
     - name: NEXT_PUBLIC_PROCESSES_URL
       value: "https://{{ processes_host }}"
-    # Empty NEXT_PUBLIC_ACCOUNTS_API_URL puts the bundle into OSS / disabled
-    # mode: `ACCOUNTS_ENABLED = Boolean(NEXT_PUBLIC_ACCOUNTS_API_URL)` flips
-    # to false, hooks short-circuit to stub data instead of looping cert
-    # errors against a non-existent accounts.{domain} host. The `new URL()`
-    # construction is guarded by ACCOUNTS_ENABLED so empty is safe.
-    - name: NEXT_PUBLIC_ACCOUNTS_API_URL
-      value: ""
-    - name: NEXT_PUBLIC_ACCOUNTS_DISABLED
-      value: "true"
   extraVolumes:
     - name: civitas-ca
       configMap:

@@ -42,9 +42,10 @@
 # writes the token to K8s Secret `<release>-windmill-token` which
 # goat-values.yaml.j2 wires into the processes deployment.
 
-- name: GOAT addon — migrate goat-core DB (alembic + initial_data)
-  ansible.builtin.import_tasks: "{{ playbook_dir }}/addons/goat_addon/tasks/04_core_migrate.yml"
-  tags: ["goat_addon"]
+# Schema migrations (alembic + initial_data) are run by the chart's
+# core-migrate hook since v0.4.0 (post-install / pre-upgrade,
+# `core.migrate.*` in values) — connecting via the same
+# `postgresql.external` wiring (goat-postgres-creds).
 
 # Windmill workspace variables (POSTGRES_*, S3_*, ...) are now seeded by the
 # chart's `windmill-variables` post-install hook (chart v0.3.7+). See
