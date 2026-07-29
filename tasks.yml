@@ -1,57 +1,65 @@
-# /home/p4b/civitas-goat-addon/tasks.yml
 ---
-# Civitas-core entry point. Included by the platform playbook via
-# inv_addons.addons fileglob.
+# Civitas-core entry point. Loaded by core_platform/playbook.yml:
 #
-# Uses `import_tasks` (static) instead of `include_tasks` (dynamic) so that
-# tag filters like `--tags goat_addon` propagate down to the inner tasks.
-# include_vars stays dynamic because it has side effects only on success.
+#   - name: Include addons
+#     include_tasks: "{{ item }}"
+#     with_fileglob: "{{ inv_addons.addons }}"
+#     tags: ["addons", "base", "tenant"]
+#
+# Two conventions matter here, and both were verified against ansible-core
+# 2.18.6 rather than assumed:
+#
+#   1. Tag is `addons` — the uniform civitas tag, no addon-specific tag.
+#      It must be declared on each task below: the platform loader is a
+#      *looped* dynamic include, and its tag does not reach the tasks in this
+#      file. Omitting it makes `--tags addons` silently skip the whole addon.
+#
+#   2. `import_tasks` (static) for our own task files, so the `addons` tag
+#      propagates into them and their individual tasks need no tags. Inside
+#      those files, `include_tasks` of civitas shared helpers (e.g.
+#      tasks/templates/k8s-namespace.yml) works normally.
+#
+# Paths use the civitas `addon_dir` convention instead of hardcoding
+# `playbook_dir + '/addons/goat_addon/'`, so the addon works wherever it is
+# checked out. `default('')` falls back to include-relative resolution.
 
-- name: GOAT addon — load defaults
+- name: "GOAT addon: load software references"
   ansible.builtin.include_vars:
-    file: "{{ playbook_dir }}/addons/goat_addon/vars/default.yml"
-  tags: ["goat_addon"]
+    file: "{{ addon_dir | default('') }}vars/software_references.yml"
+  tags: ["addons"]
 
-- name: GOAT addon — load software references
+- name: "GOAT addon: load defaults"
   ansible.builtin.include_vars:
-    file: "{{ playbook_dir }}/addons/goat_addon/vars/software_references.yml"
-  tags: ["goat_addon"]
+    file: "{{ addon_dir | default('') }}vars/default.yml"
+  tags: ["addons"]
 
-- name: GOAT addon — namespace
-  ansible.builtin.import_tasks: "{{ playbook_dir }}/addons/goat_addon/tasks/00_namespace.yml"
-  tags: ["goat_addon"]
+- name: "GOAT addon: create namespace and mirror the civitas CA"
+  ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/00_namespace.yml"
+  tags: ["addons"]
 
-- name: GOAT addon — provision DB users (goat + windmill)
-  ansible.builtin.import_tasks: "{{ playbook_dir }}/addons/goat_addon/tasks/01_db.yml"
-  tags: ["goat_addon"]
+- name: "GOAT addon: provision DB users (goat + windmill)"
+  ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/01_db.yml"
+  tags: ["addons"]
 
-- name: GOAT addon — deploy MinIO + bucket
-  ansible.builtin.import_tasks: "{{ playbook_dir }}/addons/goat_addon/tasks/05_minio.yml"
-  tags: ["goat_addon"]
+- name: "GOAT addon: deploy object storage (MinIO) + DuckLake volume"
+  ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/05_minio.yml"
+  tags: ["addons"]
 
-- name: GOAT addon — register Keycloak client
-  ansible.builtin.import_tasks: "{{ playbook_dir }}/addons/goat_addon/tasks/02_keycloak_client.yml"
-  tags: ["goat_addon"]
+- name: "GOAT addon: register Keycloak client"
+  ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/02_keycloak_client.yml"
+  tags: ["addons"]
 
-- name: GOAT addon — helm install
-  ansible.builtin.import_tasks: "{{ playbook_dir }}/addons/goat_addon/tasks/03_helm_install.yml"
-  tags: ["goat_addon"]
+- name: "GOAT addon: helm install"
+  ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/03_helm_install.yml"
+  tags: ["addons"]
 
-# Windmill bootstrap (workspace + admin password rotation + token mint) is
-# done by the chart itself as a post-install hook since v0.3.4 — the chart
-# writes the token to K8s Secret `<release>-windmill-token` which
-# goat-values.yaml.j2 wires into the processes deployment.
+# Everything below is handled by the chart's own post-install hooks, so the
+# addon has no tasks for it:
+#   * windmill workspace + admin password rotation + API token   (v0.3.4)
+#   * DuckLake catalog ATTACH                                    (v0.3.6)
+#   * windmill workspace variables (POSTGRES_*, S3_*, ...)       (v0.3.7)
+#   * alembic upgrade + initial_data                             (v0.4.0)
 
-# Schema migrations (alembic + initial_data) are run by the chart's
-# core-migrate hook since v0.4.0 (post-install / pre-upgrade,
-# `core.migrate.*` in values) — connecting via the same
-# `postgresql.external` wiring (goat-postgres-creds).
-
-# Windmill workspace variables (POSTGRES_*, S3_*, ...) are now seeded by the
-# chart's `windmill-variables` post-install hook (chart v0.3.7+). See
-# `windmill.bootstrap.variables` in templates/goat-values.yaml.j2.
-
-- name: GOAT addon — health check
-  ansible.builtin.import_tasks: "{{ playbook_dir }}/addons/goat_addon/tasks/99_health_check.yml"
-  tags: ["goat_addon"]
-
+- name: "GOAT addon: health check"
+  ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/99_health_check.yml"
+  tags: ["addons"]

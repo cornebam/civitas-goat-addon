@@ -1,4 +1,4 @@
-# /home/p4b/civitas-goat-addon/templates/goat-values.yaml.j2
+# templates/goat_values.yml — rendered in-memory by tasks/templates/k8s-helm.yml
 # Rendered by 03_helm_install.yml and passed to `helm install` as a values file.
 #
 # Hostname convention follows civitas-core's piveau pattern: the user-facing

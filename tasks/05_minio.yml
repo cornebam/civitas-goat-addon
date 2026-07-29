@@ -12,7 +12,7 @@
 # Shared DuckLake data volume. layer_import (worker-tools) writes parquet
 # under /app/data/ducklake/...; geoapi reads it for tile serving. Both must
 # see the same files — hence one PVC mounted on tools/workflows/geoapi via
-# the chart's existingClaim wiring + extraVolumes (goat-values.yaml.j2).
+# the chart's existingClaim wiring + extraVolumes (goat_values.yml).
 #
 # Storage class: inv_k8s.storage_class.rwx — production clusters set this to
 # a real RWX class (NFS / Longhorn). Civitas's default `local-path` is
@@ -22,7 +22,8 @@
 - name: "GOAT addon: create shared DuckLake data PVC"
   kubernetes.core.k8s:
     state: present
-    kubeconfig: "{{ KUBECONFIG | default(lookup('env', 'KUBECONFIG')) | default(lookup('env', 'HOME') + '/.kube/config') }}"
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     definition:
       apiVersion: v1
       kind: PersistentVolumeClaim
@@ -46,6 +47,8 @@
   block:
     - name: "GOAT addon: check for existing minio-credentials secret"
       kubernetes.core.k8s_info:
+        kubeconfig: "{{ k8s_config }}"
+        context: "{{ k8s_context }}"
         api_version: v1
         kind: Secret
         name: minio-credentials
@@ -66,6 +69,8 @@
 
 - name: "GOAT addon: persist MinIO credentials secret"
   kubernetes.core.k8s:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     state: present
     definition:
       apiVersion: v1
@@ -82,6 +87,8 @@
 
 - name: "GOAT addon: deploy MinIO (server + PVC + service)"
   kubernetes.core.k8s:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     state: present
     definition: "{{ item }}"
   loop:
@@ -164,7 +171,8 @@
 - name: "GOAT addon: deploy MinIO public ingress (for browser uploads)"
   kubernetes.core.k8s:
     state: present
-    kubeconfig: "{{ KUBECONFIG | default(lookup('env', 'KUBECONFIG')) | default(lookup('env', 'HOME') + '/.kube/config') }}"
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     definition:
       apiVersion: networking.k8s.io/v1
       kind: Ingress
@@ -200,6 +208,8 @@
 
 - name: "GOAT addon: wait for MinIO to be ready"
   kubernetes.core.k8s_info:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     api_version: apps/v1
     kind: Deployment
     name: minio
@@ -215,6 +225,8 @@
 # helm-patch in place) and recreate fresh each addon run.
 - name: "GOAT addon: clean up prior bucket-init Job"
   kubernetes.core.k8s:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     state: absent
     api_version: batch/v1
     kind: Job
@@ -224,6 +236,8 @@
 
 - name: "GOAT addon: create goat bucket in MinIO"
   kubernetes.core.k8s:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     state: present
     definition:
       apiVersion: batch/v1
@@ -259,6 +273,8 @@
 
 - name: "GOAT addon: wait for bucket-init Job to complete"
   kubernetes.core.k8s_info:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     api_version: batch/v1
     kind: Job
     name: minio-bucket-init
@@ -277,6 +293,8 @@
 # tables in Postgres + the metadata layout in S3.
 - name: "GOAT addon: fetch goat-postgres-creds for ducklake init"
   kubernetes.core.k8s_info:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     api_version: v1
     kind: Secret
     name: goat-postgres-creds
@@ -285,6 +303,8 @@
 
 - name: "GOAT addon: create ducklake-init script ConfigMap"
   kubernetes.core.k8s:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     state: present
     definition:
       apiVersion: v1
@@ -320,7 +340,7 @@
               f"keepalives_count=5"
           )
 
-          # Local path matches DUCKLAKE_DATA_DIR in goat-values.yaml.j2.
+          # Local path matches DUCKLAKE_DATA_DIR in goat_values.yml.
           # DuckLake stores parquet in S3 via the s3_* SET commands above;
           # the local path is the catalog/ATTACH marker only.
           data_path = "/app/data/ducklake"
@@ -339,6 +359,8 @@
 
 - name: "GOAT addon: clean up prior ducklake-init Job"
   kubernetes.core.k8s:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     state: absent
     api_version: batch/v1
     kind: Job
@@ -348,6 +370,8 @@
 
 - name: "GOAT addon: bootstrap DuckLake catalog (one-shot)"
   kubernetes.core.k8s:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     state: present
     definition:
       apiVersion: batch/v1
@@ -410,6 +434,8 @@
 
 - name: "GOAT addon: wait for DuckLake bootstrap Job"
   kubernetes.core.k8s_info:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     api_version: batch/v1
     kind: Job
     name: ducklake-init

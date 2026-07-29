@@ -68,7 +68,8 @@
 - name: Patch civitas central-db with prepared databases
   kubernetes.core.k8s:
     state: present
-    kubeconfig: "{{ KUBECONFIG | default(lookup('env', 'KUBECONFIG')) | default(lookup('env', 'HOME') + '/.kube/config') }}"
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     namespace: "{{ goat_addon.db.central_db_ns }}"
     apply: true
     definition:
@@ -81,7 +82,8 @@
 
 - name: Wait for goat owner-user secret to be created by postgres-operator
   kubernetes.core.k8s_info:
-    kubeconfig: "{{ KUBECONFIG | default(lookup('env', 'KUBECONFIG')) | default(lookup('env', 'HOME') + '/.kube/config') }}"
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     api_version: v1
     kind: Secret
     namespace: "{{ goat_addon.db.central_db_ns }}"
@@ -93,7 +95,8 @@
 
 - name: Wait for windmill owner-user secret to be created by postgres-operator
   kubernetes.core.k8s_info:
-    kubeconfig: "{{ KUBECONFIG | default(lookup('env', 'KUBECONFIG')) | default(lookup('env', 'HOME') + '/.kube/config') }}"
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     api_version: v1
     kind: Secret
     namespace: "{{ goat_addon.db.central_db_ns }}"
@@ -106,7 +109,8 @@
 - name: Copy DB owner-user secrets into the goat namespace
   kubernetes.core.k8s:
     state: present
-    kubeconfig: "{{ KUBECONFIG | default(lookup('env', 'KUBECONFIG')) | default(lookup('env', 'HOME') + '/.kube/config') }}"
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     definition:
       apiVersion: v1
       kind: Secret
@@ -129,7 +133,8 @@
 
 - name: Find central-db primary pod
   kubernetes.core.k8s_info:
-    kubeconfig: "{{ KUBECONFIG | default(lookup('env', 'KUBECONFIG')) | default(lookup('env', 'HOME') + '/.kube/config') }}"
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
     api_version: v1
     kind: Pod
     namespace: "{{ goat_addon.db.central_db_ns }}"

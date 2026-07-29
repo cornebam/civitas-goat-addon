@@ -21,7 +21,7 @@ goat_addon_software:
   images:
 
     # Chart-deployed services. Passed through to the helm values via
-    # templates/goat-values.yaml.j2 → consumed by the chart's per-service
+    # templates/goat_values.yml → consumed by the chart's per-service
     # `<svc>.image.{registry,repository,tag,pullPolicy}` blocks.
     core:
       registry: ghcr.io

@@ -138,7 +138,7 @@ inv_addons:
   (`{{ {varname: {...}} }}`). `01_db.yml` used this for the `goat` key before
   both keys were hardcoded to literal `goat` + `windmill`.
 
-- **`storage_class` is a dict, not a string**: civitas-core's `inv_k8s.storage_class` is `{loc, rwo, rwx}`. The chart wants a single string; the rendered values file picks `loc` by default. Override `inv_k8s.storage_class.loc` (or modify `templates/goat-values.yaml.j2` in a fork) for multi-node setups that need `rwx` storage.
+- **`storage_class` is a dict, not a string**: civitas-core's `inv_k8s.storage_class` is `{loc, rwo, rwx}`. The chart wants a single string; the rendered values file picks `loc` by default. Override `inv_k8s.storage_class.loc` (or modify `templates/goat_values.yml` in a fork) for multi-node setups that need `rwx` storage.
 
 - **Pre-existing `postgrescluster.yml` bug** in civitas-core: running the playbook without scoped tags can fail with an undefined `postgres_password` variable. Always scope to `--tags "addons,goat_addon"`.
 
