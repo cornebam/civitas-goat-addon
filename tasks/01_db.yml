@@ -65,13 +65,23 @@
         }
       } }}
 
+# central-db is a SHARED CR: core_platform/templates/operation/postgrescluster/
+# central-db.yaml and core_platform/addons/airflow_addon/templates/central-db.yaml
+# both write `preparedDatabases` too. This addon contributes goat + windmill
+# entries rather than owning the resource.
+#
+# `state: patched` issues a strategic-merge patch that adds our keys without
+# pruning siblings. `apply: true` (client-side apply) would delete keys not
+# present in this submission's last-applied-configuration — silently dropping
+# another component's DB entry on rerun. `state: present` would create a
+# malformed CR from a fragment if central-db were missing; `patched` instead
+# fails loudly.
 - name: Patch civitas central-db with prepared databases
   kubernetes.core.k8s:
-    state: present
+    state: patched
     kubeconfig: "{{ k8s_config }}"
     context: "{{ k8s_context }}"
     namespace: "{{ goat_addon.db.central_db_ns }}"
-    apply: true
     definition:
       apiVersion: acid.zalan.do/v1
       kind: postgresql
@@ -181,7 +191,7 @@
       kubectl -n {{ goat_addon.db.central_db_ns }}
       exec {{ central_db_master.resources[0].metadata.name }} -c postgres --
       psql -U postgres -d {{ goat_addon.db.goat_db_name }} -v ON_ERROR_STOP=1 -c
-      "ALTER ROLE {{ goat_addon.db.goat_db_name }}_owner_user IN DATABASE {{ goat_addon.db.goat_db_name }} SET search_path = data, public, extensions; GRANT USAGE ON SCHEMA extensions TO PUBLIC;"
+      "CREATE SCHEMA IF NOT EXISTS extensions; CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" WITH SCHEMA extensions; ALTER ROLE {{ goat_addon.db.goat_db_name }}_owner_user IN DATABASE {{ goat_addon.db.goat_db_name }} SET search_path = data, public, extensions; GRANT USAGE ON SCHEMA extensions TO PUBLIC;"
   changed_when: false
 
 - name: "Set up windmill prereqs (roles, search_path, drop stray `data` schema)"

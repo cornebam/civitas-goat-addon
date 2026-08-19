@@ -1,0 +1,50 @@
+# /home/p4b/civitas-goat-addon/tasks/04_ingress_middleware.yml
+---
+# Traefik-only: create one `stripPrefix` Middleware per prefix-stripped
+# service. Skipped entirely on other controllers (ingress-nginx handles
+# prefix stripping via `rewrite-target` annotations — see the nginx
+# profile in vars/default.yml).
+#
+# The stripPrefix middleware also sets `X-Forwarded-Prefix` on the
+# upstream request, which nothing in GOAT reads today but would be the
+# hook if/when the upstream ROOT_PATH work lands.
+#
+# API group: `traefik.io/v1alpha1` in Traefik v3, `traefik.containo.us/
+# v1alpha1` in Traefik v2. Same Kind (`Middleware`) and spec across
+# versions; only the group differs. Overridable via
+# `inv_addons.goat.ingress.traefik_api_group`.
+#
+# Ordered `04_` — the previous occupant (`04_apisix_routes.yml`) was
+# removed in commit 66219cd. Include order in tasks.yml puts this
+# BEFORE `03_helm_install.yml`… wait: the chart's Ingress objects hold
+# only an ANNOTATION reference to the middleware (not an ownerReference),
+# so the middleware needs to exist by the time Traefik reads the ingress.
+# `03_helm_install.yml` blocks until pods are ready anyway, so having
+# this task file included before or after that in tasks.yml is fine —
+# what matters is that both this and the Helm install happen before
+# any request hits Traefik. Included AFTER Helm install here to avoid
+# a chicken-and-egg failure if the traefik CRDs aren't installed until
+# after the Helm chart's dependencies are pulled.
+
+- name: "GOAT addon (traefik): create stripPrefix Middleware for {{ item.svc }}"
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
+    definition:
+      apiVersion: "{{ goat_addon.ingress.traefik_api_group }}"
+      kind: Middleware
+      metadata:
+        name: "goat-strip-{{ item.svc }}"
+        namespace: "{{ goat_addon.namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: civitas-goat-addon
+      spec:
+        stripPrefix:
+          prefixes:
+            - "{{ item.prefix }}"
+  loop:
+    - { svc: geoapi, prefix: /geoapi }
+    - { svc: processes, prefix: /processes }
+  loop_control:
+    label: "goat-strip-{{ item.svc }}"

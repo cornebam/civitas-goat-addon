@@ -33,6 +33,23 @@
     file: "{{ addon_dir | default('') }}vars/default.yml"
   tags: ["addons"]
 
+# geoapi and processes need controller-specific ingress annotations
+# (nginx uses regex rewrite; Traefik uses a Middleware CRD). Without an
+# ingress profile matching inv_k8s.ingress_class, both fall through the
+# `/` catch-all to goat-web, which returns an HTML 404 with no error
+# logged anywhere. Fail clearly here rather than silently mis-route.
+- name: "GOAT addon: assert ingress class is supported by the profile map"
+  ansible.builtin.assert:
+    that:
+      - inv_k8s.ingress_class in goat_addon.ingress.profiles
+    fail_msg: >-
+      inv_k8s.ingress_class = `{{ inv_k8s.ingress_class }}` but the goat
+      addon has no ingress routing profile for it. Supported controllers:
+      {{ goat_addon.ingress.profiles.keys() | list | join(', ') }}. Add a
+      profile under `goat_addon.ingress.profiles.<class>` in
+      vars/default.yml — see the block there for the schema.
+  tags: ["addons"]
+
 - name: "GOAT addon: create namespace and mirror the civitas CA"
   ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/00_namespace.yml"
   tags: ["addons"]
@@ -51,6 +68,15 @@
 
 - name: "GOAT addon: helm install"
   ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/03_helm_install.yml"
+  tags: ["addons"]
+
+# Traefik only: create stripPrefix Middleware CRDs referenced by the
+# geoapi and processes ingresses. See 04_ingress_middleware.yml for
+# why this runs after the Helm install rather than before. `include_tasks`
+# instead of `import_tasks` so the `when:` gate short-circuits properly.
+- name: "GOAT addon: Traefik-only — create stripPrefix Middleware CRDs"
+  ansible.builtin.include_tasks: "{{ addon_dir | default('') }}tasks/04_ingress_middleware.yml"
+  when: inv_k8s.ingress_class == 'traefik'
   tags: ["addons"]
 
 # Everything below is handled by the chart's own post-install hooks, so the

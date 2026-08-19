@@ -14,10 +14,26 @@ goat_addon_software:
   helm_repo_url: oci://ghcr.io/plan4better/charts
   helm_chart_version: "0.4.0"
 
+  # ── GOAT release tag (applies to every image built from plan4better/goat) ─
+  # Eight images ship from one monorepo and MUST agree on their release tag:
+  #   - geoapi, processes and windmill_worker_tools share a DuckLake catalog
+  #     via a Postgres schema; the DuckDB extension baked into each image
+  #     writes the catalog's on-disk format, so a version skew between them
+  #     produces "DuckLake catalog version mismatch" at attach time.
+  #   - core does not use DuckDB itself (it delegates DuckLake to geoapi over
+  #     HTTP, see apps/core/src/core/crud/crud_folder.py) — pinned here for
+  #     release coherence and API compatibility with geoapi/processes, not
+  #     for catalog compatibility.
+  #   - web / windmill_server / windmill_worker_default / windmill_worker_print
+  #     move together for release coherence.
+  # Override per-deployment with `inv_addons.goat.release`.
+  goat_release: "{{ inv_addons.goat.release | default('v2.4.58') }}"
+
   # ── Container images ────────────────────────────────────────────────────
   # Each entry maps to a Deployment / Job that this addon (directly or via
   # the chart) creates. Mirror-friendly: change `registry` to point at a
-  # private registry copy.
+  # private registry copy. Every GOAT-monorepo image defaults its `tag` to
+  # `goat_release`; override the tag individually if you truly need a skew.
   images:
 
     # Chart-deployed services. Passed through to the helm values via
@@ -26,49 +42,49 @@ goat_addon_software:
     core:
       registry: ghcr.io
       repository: plan4better/goat/core
-      tag: f59d1e3
+      tag: "{{ goat_addon_software.goat_release }}"
       pullPolicy: IfNotPresent
     web:
       registry: ghcr.io
       repository: plan4better/goat/web
-      tag: f59d1e3
+      tag: "{{ goat_addon_software.goat_release }}"
       pullPolicy: IfNotPresent
     geoapi:
       registry: ghcr.io
       repository: plan4better/goat/geoapi
-      tag: latest
+      tag: "{{ goat_addon_software.goat_release }}"
       pullPolicy: IfNotPresent
     processes:
       registry: ghcr.io
       repository: plan4better/goat/processes
-      tag: latest
+      tag: "{{ goat_addon_software.goat_release }}"
       pullPolicy: IfNotPresent
     windmill_server:
       registry: ghcr.io
       repository: plan4better/goat/windmill-server
-      tag: latest
+      tag: "{{ goat_addon_software.goat_release }}"
       pullPolicy: IfNotPresent
     windmill_worker_default:
       registry: ghcr.io
       repository: plan4better/goat/windmill-worker-default
-      tag: latest
+      tag: "{{ goat_addon_software.goat_release }}"
       pullPolicy: IfNotPresent
     # Heavier worker image (goatlib + geospatial deps) used by both `tools`
     # and `workflows` worker pods — the chart shares one image between them.
-    # NB: pinned to v2.4.36 because v2.4.37 (and the `:latest` tag, which
-    # points at v2.4.37) ship a 0-byte windmill binary that crashes at
-    # startup with `exec format error`. v2.4.36 is the most recent build
-    # that boots cleanly. Bump once upstream republishes a working `:latest`.
+    # Historical note: `v2.4.37` shipped a zero-byte windmill binary that
+    # crashed with `exec format error`; this image was pinned to `v2.4.36`
+    # for many releases. That pin is long past its usefulness — do not
+    # reintroduce it reflexively. Track goat_release with everyone else.
     windmill_worker_tools:
       registry: ghcr.io
       repository: plan4better/goat/windmill-worker-tools
-      tag: v2.4.36
+      tag: "{{ goat_addon_software.goat_release }}"
       pullPolicy: IfNotPresent
     # Chromium-based PDF/atlas generation worker.
     windmill_worker_print:
       registry: ghcr.io
       repository: plan4better/goat/windmill-worker-print
-      tag: latest
+      tag: "{{ goat_addon_software.goat_release }}"
       pullPolicy: IfNotPresent
 
     # Bundled redis (Bitnami sub-chart). Free Bitnami images moved to
@@ -89,9 +105,4 @@ goat_addon_software:
       registry: quay.io
       repository: minio/mc
       tag: RELEASE.2025-08-13T08-35-41Z
-      pullPolicy: IfNotPresent
-    ducklake_init:
-      registry: docker.io
-      repository: library/python
-      tag: "3.11-slim"
       pullPolicy: IfNotPresent

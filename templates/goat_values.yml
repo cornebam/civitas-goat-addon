@@ -1,14 +1,30 @@
 # templates/goat_values.yml — rendered in-memory by tasks/templates/k8s-helm.yml
 # Rendered by 03_helm_install.yml and passed to `helm install` as a values file.
 #
-# Hostname convention follows civitas-core's piveau pattern: the user-facing
-# app sits at <app>.<DOMAIN> and each backend gets <service>.<app>.<DOMAIN>.
+# The whole stack is served from a single hostname (`goat_host`, derived from
+# goat_addon.web.public_url — the operator sets it in inventory as
+# inv_addons.goat.web.public_url). Path map:
+#
+#   /                → goat-web       (host root, no rewrite)
+#   /core            → goat-core      (API_V2_STR handles the prefix, no rewrite)
+#   /geoapi          → geoapi         (nginx rewrite-target)
+#   /processes       → processes      (nginx rewrite-target)
+#   /<bucket>        → MinIO (05_minio.yml) — path prefix must EQUAL the bucket
+#                                       name so path-style SigV4 signatures
+#                                       validate; no rewrite.
+#   (windmill has no public ingress — processes reaches it in-cluster only)
+#
+# All ingresses share the same TLS secret (`s3_tls_secret_name`) since one
+# hostname cannot be served by multiple secrets.
 {%- set goat_host = goat_addon.web.public_url | regex_replace('^https?://', '') %}
-{%- set core_host = 'core.' + goat_host %}
-{%- set geoapi_host = 'geoapi.' + goat_host %}
-{%- set processes_host = 'processes.' + goat_host %}
-{%- set windmill_host = 'windmill.' + goat_host %}
-{%- set s3_host = 's3.' + goat_host %}
+{%- set s3_tls_secret_name = 'goat-' + DOMAIN + '-tls' %}
+{#- Ingress routing profile for geoapi and processes. See
+    goat_addon.ingress.profiles in vars/default.yml for the schema and
+    the strategic note on why this exists. `is_nginx` gates annotations
+    that are silently ignored on other controllers (proxy-body-size,
+    ssl-redirect) so we do not clutter the ingress spec with dead keys. #}
+{%- set ingress_profile = goat_addon.ingress.profiles[inv_k8s.ingress_class] %}
+{%- set is_nginx = inv_k8s.ingress_class == 'nginx' %}
 
 global:
   # inv_k8s.storage_class is a DICT in civitas-core ({loc, rwo, rwx}); the
@@ -46,22 +62,24 @@ core:
   {{ img('core') }}
   # goat-web's bundle calls the core API from the browser directly
   # (NEXT_PUBLIC_API_URL is baked in), so core must be reachable externally.
+  # Mounted at /core under goat_host; API_V2_STR below carries the prefix so
+  # no controller needs to rewrite. goat-core emits no absolute URLs.
   ingress:
     enabled: true
     className: "{{ inv_k8s.ingress_class }}"
     annotations:
       cert-manager.io/cluster-issuer: "{{ inv_k8s.cert_manager.issuer_name }}"
       kubernetes.io/ingress.class: "{{ inv_k8s.ingress_class }}"
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    hosts:
-      - host: "{{ core_host }}"
+{% if is_nginx %}      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+{% endif %}    hosts:
+      - host: "{{ goat_host }}"
         paths:
-          - path: /
+          - path: /core
             pathType: Prefix
     tls:
-      - secretName: "goat-core-{{ DOMAIN }}-tls"
+      - secretName: "{{ s3_tls_secret_name }}"
         hosts:
-          - "{{ core_host }}"
+          - "{{ goat_host }}"
   # AUTH=false: goat-core serves all data as the single default identity
   # (seeded by the chart's migrate hook); goat-web's NextAuth still gates
   # UI sign-in through civitas's Keycloak realm. Flipping this to true
@@ -78,15 +96,38 @@ core:
   #   - S3_ENDPOINT_URL        — used by boto3 in-cluster (HTTP, internal)
   #   - S3_PUBLIC_ENDPOINT_URL — substituted into presigned URLs returned to
   #     the browser; must be HTTPS so the SPA's fetch isn't mixed-content
-  #     blocked. See goat/apps/core/src/core/services/s3.py.
+  #     blocked. Presigned URLs are path-style (S3_FORCE_PATH_STYLE=true),
+  #     so the browser hits `https://<goat_host>/<bucket>/…` which routes
+  #     to MinIO via the ingress in 05_minio.yml. See goat/apps/core/src/
+  #     core/services/s3.py.
   config:
     ENVIRONMENT: prod
+    # API mounted at /core; goat-core reads API_V2_STR (BaseSettings, no
+    # env_prefix — apps/core/src/core/core/config.py) and prepends it to
+    # every route, so nginx doesn't rewrite. goat-web appends this to
+    # NEXT_PUBLIC_API_URL when building URLs.
+    API_V2_STR: "/core/api/v2"
+    CLIENT_URL: "https://{{ goat_host }}"
     S3_PROVIDER: "minio"
     S3_ENDPOINT_URL: "http://minio.{{ goat_addon.namespace }}.svc.cluster.local:9000"
-    S3_PUBLIC_ENDPOINT_URL: "https://{{ s3_host }}"
+    S3_PUBLIC_ENDPOINT_URL: "https://{{ goat_host }}"
     S3_REGION: "us-east-1"
     S3_BUCKET_NAME: "{{ goat_addon.minio.bucket }}"
     S3_FORCE_PATH_STYLE: "true"
+    # Default org plan + quotas. These feed SELF_HOSTED_PLAN_METADATA in
+    # apps/core/src/core/crud/crud_organization.py, which is the branch
+    # taken when Stripe billing is not configured.
+    #
+    # STRIPE_SECRET_KEY MUST remain unset. In crud_organization.py the
+    # 14-day trial flag is gated solely on `billing_enabled =
+    # bool(settings.STRIPE_SECRET_KEY)`; with it unset, organizations are
+    # created with on_trial=False and no renewal date. Setting the key
+    # would flip every new org into a Stripe trial without a payment path.
+    DEFAULT_PLAN_NAME: "goat_enterprise"
+    DEFAULT_QUOTA_STORAGE_MB: "1048576"
+    DEFAULT_QUOTA_PROJECTS: "10000"
+    DEFAULT_QUOTA_EDITORS: "1000"
+    DEFAULT_QUOTA_VIEWERS: "1000"
   extraEnv:
     - name: S3_ACCESS_KEY_ID
       valueFrom:
@@ -155,29 +196,30 @@ geoapi:
       readOnly: true
     - name: ducklake-data
       mountPath: /app/data
+  # geoapi at /geoapi. Path shape + prefix stripping come from the ingress
+  # profile — regex `rewrite-target` on nginx, `stripPrefix` Middleware on
+  # Traefik. geoapi emits absolute URLs from request.base_url (missing the
+  # prefix), but goat-web never consumes them — it composes every backend
+  # URL itself from NEXT_PUBLIC_GEOAPI_URL.
   ingress:
     enabled: true
     className: "{{ inv_k8s.ingress_class }}"
     annotations:
       cert-manager.io/cluster-issuer: "{{ inv_k8s.cert_manager.issuer_name }}"
       kubernetes.io/ingress.class: "{{ inv_k8s.ingress_class }}"
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    hosts:
-      - host: "{{ geoapi_host }}"
+{% if is_nginx %}      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+{% endif %}{% if ingress_profile.needs_middleware %}      traefik.ingress.kubernetes.io/router.middlewares: "{{ goat_addon.namespace }}-goat-strip-geoapi@kubernetescrd"
+{% endif %}{% for k, v in ingress_profile.annotations.items() %}      {{ k }}: "{{ v }}"
+{% endfor %}    hosts:
+      - host: "{{ goat_host }}"
         paths:
-          - path: /
-            pathType: Prefix
+          - path: "/geoapi{{ ingress_profile.path_suffix }}"
+            pathType: "{{ ingress_profile.pathType }}"
     tls:
-      - secretName: "goat-geoapi-{{ DOMAIN }}-tls"
+      - secretName: "{{ s3_tls_secret_name }}"
         hosts:
-          - "{{ geoapi_host }}"
+          - "{{ goat_host }}"
 
-# `processes` is the job-submission API surface. It hands jobs to Windmill
-# (`goat-windmill-server` in-cluster). WINDMILL_TOKEN is provisioned by
-# 06_windmill.yml into the K8s Secret `windmill-token`; we reference it
-# below with `optional: true` so pods come up before the bootstrap Job runs
-# on first install, then pick it up via the rollout-restart 06 triggers.
-# Wire the rest to the same Postgres / MinIO / Keycloak / CA bundle as geoapi.
 processes:
   enabled: true
   {{ img('processes') }}
@@ -219,15 +261,6 @@ processes:
     - name: DUCKLAKE_S3_SECRET_KEY
       valueFrom:
         secretKeyRef: { name: minio-credentials, key: secret_key }
-    # Bootstrapped by the chart's post-install hook (since chart v0.3.4)
-    # into K8s Secret `<release>-windmill-token`. `optional: true` lets
-    # processes pods come up before the hook finishes on first install.
-    - name: WINDMILL_TOKEN
-      valueFrom:
-        secretKeyRef:
-          name: goat-windmill-token
-          key: token
-          optional: true
   extraVolumes:
     - name: civitas-ca
       configMap:
@@ -237,22 +270,27 @@ processes:
     - name: civitas-ca
       mountPath: /etc/ssl/civitas
       readOnly: true
+  # processes at /processes. Same profile-driven prefix-strip pattern as
+  # geoapi. Same absolute-URL caveat — the UI composes URLs itself from
+  # NEXT_PUBLIC_PROCESSES_URL.
   ingress:
     enabled: true
     className: "{{ inv_k8s.ingress_class }}"
     annotations:
       cert-manager.io/cluster-issuer: "{{ inv_k8s.cert_manager.issuer_name }}"
       kubernetes.io/ingress.class: "{{ inv_k8s.ingress_class }}"
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    hosts:
-      - host: "{{ processes_host }}"
+{% if is_nginx %}      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+{% endif %}{% if ingress_profile.needs_middleware %}      traefik.ingress.kubernetes.io/router.middlewares: "{{ goat_addon.namespace }}-goat-strip-processes@kubernetescrd"
+{% endif %}{% for k, v in ingress_profile.annotations.items() %}      {{ k }}: "{{ v }}"
+{% endfor %}    hosts:
+      - host: "{{ goat_host }}"
         paths:
-          - path: /
-            pathType: Prefix
+          - path: "/processes{{ ingress_profile.path_suffix }}"
+            pathType: "{{ ingress_profile.pathType }}"
     tls:
-      - secretName: "goat-processes-{{ DOMAIN }}-tls"
+      - secretName: "{{ s3_tls_secret_name }}"
         hosts:
-          - "{{ processes_host }}"
+          - "{{ goat_host }}"
 
 web:
   enabled: true
@@ -269,14 +307,32 @@ web:
       value: /etc/ssl/civitas/ca.crt
     # Browser-side: goat-web's SPA calls each backend directly. entrypoint.sh
     # substitutes APP_NEXT_PUBLIC_* placeholders in the bundle at start.
+    # All four URLs share goat_host — the path suffix routes to the right
+    # backend via ingress.
+    #
+    # TRAILING-SLASH ASYMMETRY (do not "normalise", it is load-bearing):
+    #
+    # - NEXT_PUBLIC_API_URL is consumed as `new URL("api/v2/...", base)`
+    #   (lib/api/organizations.ts:13 and ~20 similar sites). The relative
+    #   part has no leading slash, so RFC 3986 resolution drops everything
+    #   after the last `/` in the base. Without the trailing slash,
+    #   `.../core` becomes `.../api/v2/...` — the request lands on goat-web
+    #   and returns an HTML 404 with no error logged anywhere. MUST end
+    #   in `/`.
+    #
+    # - The other three are string-concatenated with an explicit leading
+    #   slash (`${GEOAPI_BASE_URL}/collections`, `${PROCESSES_BASE_URL}/jobs`).
+    #   NEXT_PUBLIC_APP_URL additionally feeds NEXTAUTH_URL, which rejects
+    #   a trailing `/` (would produce `//` in the callback path and 404).
+    #   MUST NOT end in `/`.
     - name: NEXT_PUBLIC_API_URL
-      value: "https://{{ core_host }}"
+      value: "https://{{ goat_host }}/core/"
     - name: NEXT_PUBLIC_APP_URL
-      value: "{{ goat_addon.web.public_url }}"
+      value: "https://{{ goat_host }}"
     - name: NEXT_PUBLIC_GEOAPI_URL
-      value: "https://{{ geoapi_host }}"
+      value: "https://{{ goat_host }}/geoapi"
     - name: NEXT_PUBLIC_PROCESSES_URL
-      value: "https://{{ processes_host }}"
+      value: "https://{{ goat_host }}/processes"
   extraVolumes:
     - name: civitas-ca
       configMap:
@@ -286,20 +342,23 @@ web:
     - name: civitas-ca
       mountPath: /etc/ssl/civitas
       readOnly: true
+  # goat-web at the host root. Next.js basePath is build-time (not set in
+  # this image's next.config.js), so serving under a subpath is impossible
+  # without a fork — hence web takes /.
   ingress:
     enabled: true
     className: "{{ inv_k8s.ingress_class }}"
     annotations:
       cert-manager.io/cluster-issuer: "{{ inv_k8s.cert_manager.issuer_name }}"
       kubernetes.io/ingress.class: "{{ inv_k8s.ingress_class }}"
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    hosts:
+{% if is_nginx %}      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+{% endif %}    hosts:
       - host: "{{ goat_host }}"
         paths:
           - path: /
             pathType: Prefix
     tls:
-      - secretName: "goat-web-{{ DOMAIN }}-tls"
+      - secretName: "{{ s3_tls_secret_name }}"
         hosts:
           - "{{ goat_host }}"
     # KNOWN GOTCHA: Next.js serves /_next/static/chunks/*.js with
@@ -341,9 +400,10 @@ redis:
 # is cleared here — civitas's local clusters don't carry that taint. Bootstrap
 # (workspace + API token) is a chart post-install hook.
 #
-# Dedicated `windmill` database provisioned by 01b_windmill_db.yml — we do
-# NOT share the goat DB (windmill's migrations write ~100 tables and need
-# role-creation privileges the goat user doesn't have).
+# Dedicated `windmill` database provisioned by 01_db.yml (alongside the
+# `goat` DB) — we do NOT share the goat DB (windmill's migrations write
+# ~100 tables and need role-creation privileges the goat user doesn't
+# have).
 windmill:
   db:
     reuseGoatConnection: false
@@ -367,27 +427,16 @@ windmill:
       tag: "{{ goat_addon_software.images.windmill_server.tag }}"
       pullPolicy: "{{ goat_addon_software.images.windmill_server.pullPolicy | default('IfNotPresent') }}"
     # BASE_URL drives windmill's outbound links (emails, webhooks, the
-    # `Open in Windmill` button). Set it to the public URL so links work
-    # outside the cluster.
+    # `Open in Windmill` button). Windmill cannot be served under a subpath,
+    # and `processes` reaches it in-cluster via WINDMILL_URL below, so it
+    # has no public ingress. Point BASE_URL at the in-cluster service so
+    # links that windmill generates internally are at least resolvable
+    # from other pods — anything mailed outside the cluster is a dead link.
     config:
       MODE: "server"
-      BASE_URL: "https://{{ windmill_host }}"
+      BASE_URL: "http://goat-windmill-server"
     ingress:
-      enabled: true
-      className: "{{ inv_k8s.ingress_class }}"
-      annotations:
-        cert-manager.io/cluster-issuer: "{{ inv_k8s.cert_manager.issuer_name }}"
-        kubernetes.io/ingress.class: "{{ inv_k8s.ingress_class }}"
-        nginx.ingress.kubernetes.io/ssl-redirect: "true"
-      hosts:
-        - host: "{{ windmill_host }}"
-          paths:
-            - path: /
-              pathType: Prefix
-      tls:
-        - secretName: "goat-windmill-server-{{ DOMAIN }}-tls"
-          hosts:
-            - "{{ windmill_host }}"
+      enabled: false
   # Each goatlib-running worker (tools/workflows/print) needs the application
   # DB + S3 + DuckLake config on its env. We rely on chart v0.3.7's renamed
   # internal vars (_WMILL_DB_*) leaving the POSTGRES_* namespace free for
@@ -433,7 +482,7 @@ windmill:
         POSTGRES_DB: "{{ goat_addon.db.goat_db_name }}"
         S3_PROVIDER: "minio"
         S3_ENDPOINT_URL: "http://minio.{{ goat_addon.namespace }}.svc.cluster.local:9000"
-        S3_PUBLIC_ENDPOINT_URL: "https://{{ s3_host }}"
+        S3_PUBLIC_ENDPOINT_URL: "https://{{ goat_host }}"
         S3_REGION: "us-east-1"
         S3_BUCKET_NAME: "{{ goat_addon.minio.bucket }}"
         DUCKLAKE_CATALOG_SCHEMA: "ducklake"
@@ -474,7 +523,7 @@ windmill:
         POSTGRES_DB: "{{ goat_addon.db.goat_db_name }}"
         S3_PROVIDER: "minio"
         S3_ENDPOINT_URL: "http://minio.{{ goat_addon.namespace }}.svc.cluster.local:9000"
-        S3_PUBLIC_ENDPOINT_URL: "https://{{ s3_host }}"
+        S3_PUBLIC_ENDPOINT_URL: "https://{{ goat_host }}"
         S3_REGION: "us-east-1"
         S3_BUCKET_NAME: "{{ goat_addon.minio.bucket }}"
         DUCKLAKE_CATALOG_SCHEMA: "ducklake"

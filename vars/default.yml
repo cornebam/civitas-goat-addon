@@ -1,5 +1,7 @@
 # /home/p4b/civitas-goat-addon/vars/default.yml
 ---
+addon_dir: "addons/goat_addon/"
+
 goat_addon:
   namespace: "{{ inv_addons.goat.namespace | default(ENVIRONMENT + '-goat-stack') }}"
   # Civitas conventions: every stack declares whether it creates its own
@@ -41,6 +43,56 @@ goat_addon:
     # provision RWX — set ReadWriteOnce there (sharing then relies on
     # co-scheduling, see README).
     pvc_access_mode: "{{ inv_addons.goat.ducklake.pvc_access_mode | default('ReadWriteMany') }}"
+  # Ingress routing profile — controller-specific handling for the two
+  # services that DO NOT support FastAPI `root_path`: geoapi and processes.
+  # /core, /, /<bucket> route identically on every controller (goat-core
+  # carries its own prefix via API_V2_STR; goat-web sits at the host root;
+  # MinIO's path equals the bucket name, no rewrite). Selected by
+  # `inv_k8s.ingress_class`; an assert in tasks.yml catches unknown values.
+  #
+  # STRATEGIC NOTE: this abstraction exists only because geoapi/processes
+  # emit absolute URLs from `request.base_url` without the ingress prefix,
+  # and FastAPI's `root_path` support is missing upstream. When the
+  # ROOT_PATH change lands in plan4better/goat, both services can serve
+  # under their own prefix like goat-core already does, and the whole
+  # profile map + Middleware CRDs + conditional annotations can be
+  # deleted in favour of plain `Prefix` paths.
+  #
+  # Additive by design: adding e.g. APISIX means adding an `apisix:` key
+  # under `profiles`, not another elif branch.
+  ingress:
+    # Traefik Middleware CRD API group. `traefik.io/v1alpha1` = Traefik v3
+    # (current default); `traefik.containo.us/v1alpha1` = Traefik v2. The
+    # CRD name is the same across versions; only the API group differs.
+    # Detection at runtime is possible but adds a k8s_info lookup per
+    # run — expose as a plain override instead and default to v3.
+    traefik_api_group: "{{ inv_addons.goat.ingress.traefik_api_group | default('traefik.io/v1alpha1') }}"
+    profiles:
+      nginx:
+        # ingress-nginx: annotation-driven regex rewrite. `use-regex: true`
+        # enables the regex path matcher; `rewrite-target: /$2` strips the
+        # ingress prefix by rewriting to the captured tail before proxy.
+        path_suffix: "(/|$)(.*)"
+        pathType: "ImplementationSpecific"
+        annotations:
+          nginx.ingress.kubernetes.io/rewrite-target: "/$2"
+          nginx.ingress.kubernetes.io/use-regex: "true"
+        # No CRDs — nginx rewrites inline.
+        needs_middleware: false
+      traefik:
+        # Traefik has no regex path matcher and no annotation that
+        # rewrites the request path. Prefix stripping requires a
+        # `stripPrefix` Middleware CRD (created by
+        # tasks/04_ingress_middleware.yml) referenced from each ingress
+        # via `router.middlewares`. Traefik's stripPrefix additionally
+        # sets X-Forwarded-Prefix on the upstream — nothing in GOAT reads
+        # it today, but it is what the upstream ROOT_PATH work would use.
+        # The annotation format `<namespace>-<name>@kubernetescrd` is
+        # mandatory and fails silently if wrong.
+        path_suffix: ""
+        pathType: "Prefix"
+        annotations: {}
+        needs_middleware: true
   # Windmill workspace + admin password rotation are handled by the chart
   # itself (post-install hook, since chart v0.3.4). The addon doesn't need
   # any windmill-app config — just point processes at the chart-managed

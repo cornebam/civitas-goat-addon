@@ -164,10 +164,55 @@
           - { name: console, port: 9001, targetPort: 9001 }
 
 # Expose MinIO over HTTPS for browser-side uploads. Goat-core returns
-# presigned S3 URLs that the SPA fetches directly — they MUST be HTTPS,
-# or Chrome mixed-content-blocks them. The hostname mirrors the per-service
-# subdomain convention (s3.<goat-host>) and gets a civitas-CA-signed cert
-# via cert-manager so the browser trusts it without prompting.
+# presigned S3 URLs that the SPA fetches directly — they MUST be HTTPS
+# or Chrome mixed-content-blocks them.
+#
+# The ingress path MUST equal `/` + bucket name. GOAT uses path-style S3
+# (`S3_FORCE_PATH_STYLE=true`), so presigned URLs look like
+# `https://<goat_host>/<bucket>/<key>?X-Amz-Signature=…`. SigV4 signs the
+# canonical URI, so any nginx rewrite that alters the path breaks every
+# signature. This ingress therefore adds NO rewrite-target annotation and
+# uses the bucket name as its prefix.
+#
+# Shares goat_host (derived from goat_addon.web.public_url) and the same
+# TLS secret as the goat_values.yml ingresses — one hostname cannot be
+# served by multiple secrets.
+- name: "GOAT addon: derive goat_host + S3 ingress path from inventory"
+  ansible.builtin.set_fact:
+    goat_host: "{{ goat_addon.web.public_url | regex_replace('^https?://', '') }}"
+    s3_ingress_path: "/{{ goat_addon.minio.bucket }}"
+    s3_tls_secret_name: "goat-{{ DOMAIN }}-tls"
+
+# nginx: default request body limit is 1 MB and default read/send timeouts
+# are 60s — both break dataset uploads to MinIO, hence the four annotations
+# below. Traefik has no default request body size limit and higher default
+# timeouts, so the nginx-only annotations are conditional. HTTPS redirect
+# on Traefik is expected to be configured at the entrypoint (or via a
+# redirectScheme middleware) — see README.
+#
+# `set_fact` preserves the dict type only when the whole value is a single
+# `{{ expr }}` — do NOT use `>-` here, that folds to a string.
+- name: "GOAT addon: build MinIO ingress annotations for {{ inv_k8s.ingress_class }}"
+  ansible.builtin.set_fact:
+    minio_ingress_annotations: "{{ minio_base_annotations | combine(minio_nginx_annotations if inv_k8s.ingress_class == 'nginx' else {}) }}"
+  vars:
+    minio_base_annotations:
+      cert-manager.io/cluster-issuer: "{{ inv_k8s.cert_manager.issuer_name }}"
+      kubernetes.io/ingress.class: "{{ inv_k8s.ingress_class }}"
+    minio_nginx_annotations:
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/proxy-body-size: "5g"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+
+- name: "GOAT addon: assert S3 ingress path matches bucket name"
+  ansible.builtin.assert:
+    that:
+      - s3_ingress_path == '/' + goat_addon.minio.bucket
+    fail_msg: >-
+      The MinIO ingress path must equal '/' + the bucket name, otherwise
+      path-style presigned URL signatures will not validate.
+
 - name: "GOAT addon: deploy MinIO public ingress (for browser uploads)"
   kubernetes.core.k8s:
     state: present
@@ -181,25 +226,18 @@
         namespace: "{{ goat_addon.namespace }}"
         labels:
           app.kubernetes.io/managed-by: civitas-goat-addon
-        annotations:
-          cert-manager.io/cluster-issuer: "{{ inv_k8s.cert_manager.issuer_name }}"
-          kubernetes.io/ingress.class: "{{ inv_k8s.ingress_class }}"
-          nginx.ingress.kubernetes.io/ssl-redirect: "true"
-          # Datasets can be large; lift the 1 MB default and the 60s timeout.
-          nginx.ingress.kubernetes.io/proxy-body-size: "5g"
-          nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
-          nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+        annotations: "{{ minio_ingress_annotations }}"
       spec:
         ingressClassName: "{{ inv_k8s.ingress_class }}"
         tls:
           - hosts:
-              - "s3.goat.{{ DOMAIN }}"
-            secretName: "minio-s3-{{ DOMAIN }}-tls"
+              - "{{ goat_host }}"
+            secretName: "{{ s3_tls_secret_name }}"
         rules:
-          - host: "s3.goat.{{ DOMAIN }}"
+          - host: "{{ goat_host }}"
             http:
               paths:
-                - path: /
+                - path: "{{ s3_ingress_path }}"
                   pathType: Prefix
                   backend:
                     service:
@@ -288,9 +326,18 @@
 # DuckLake bootstrap. The chart's `DUCKLAKE_CREATE_IF_NOT_EXISTS` env var is
 # unused dead config — geoapi attaches in READ_ONLY mode and DuckDB refuses
 # to create a missing lake. The lake must already exist before any read-only
-# consumer (geoapi, future processes) starts. A small Python script does the
+# consumer (geoapi, processes) starts. A small Python script does the
 # initial ATTACH (read-write, no READ_ONLY flag) which creates the catalog
 # tables in Postgres + the metadata layout in S3.
+#
+# INVARIANT: the catalog's on-disk format is written by the DuckDB extension
+# baked into the GOAT image. Every service that later attaches this catalog
+# (geoapi, processes, windmill-worker-tools) must run the same GOAT release
+# — see vars/software_references.yml.goat_release. Historically this Job ran
+# on `python:3.11-slim` and did `pip install duckdb==X.Y.Z`, which decoupled
+# the catalog format from the runtime extension version and produced hard
+# `DuckLake catalog version mismatch` failures at first attach. The Job now
+# runs from the `processes` image so its extension IS the runtime extension.
 - name: "GOAT addon: fetch goat-postgres-creds for ducklake init"
   kubernetes.core.k8s_info:
     kubeconfig: "{{ k8s_config }}"
@@ -316,15 +363,23 @@
           app.kubernetes.io/managed-by: civitas-goat-addon
       data:
         init.py: |
-          """One-shot DuckLake catalog bootstrap. Read env vars for connection
-          details, then ATTACH the lake in read-write mode so DuckDB creates
-          the catalog schema + S3 layout if missing."""
+          """One-shot DuckLake catalog bootstrap. Runs from the `processes`
+          image so LOAD alone hits the extensions baked into
+          DUCKDB_EXTENSION_DIRECTORY, and the catalog's on-disk format
+          matches every runtime attach."""
           import os
           import duckdb
 
           con = duckdb.connect()
           for ext in ("spatial", "httpfs", "postgres", "ducklake"):
-              con.execute(f"INSTALL {ext}; LOAD {ext};")
+              try:
+                  con.execute(f"LOAD {ext};")
+              except duckdb.Error:
+                  # Fallback if the extension directory was overridden.
+                  # This goes to the internet; the Job's activeDeadlineSeconds
+                  # is the hard cap if the mirror is unreachable.
+                  con.execute(f"INSTALL {ext};")
+                  con.execute(f"LOAD {ext};")
 
           con.execute("SET s3_endpoint = ?;", [os.environ["S3_ENDPOINT"]])
           con.execute("SET s3_access_key_id = ?;", [os.environ["S3_KEY"]])
@@ -348,10 +403,17 @@
           schema = os.environ["SCHEMA"]
 
           # No READ_ONLY → DuckDB creates the catalog if it doesn't exist.
+          # AUTOMATIC_MIGRATION TRUE is the ONLY place a catalog format
+          # upgrade can happen: goatlib's runtime attach
+          # (packages/python/goatlib/src/goatlib/storage/ducklake.py,
+          # _attach_ducklake) hardcodes its option list with no migration
+          # flag, so services would otherwise fail on a version-mismatched
+          # existing catalog after a GOAT release bump.
           con.execute(
               f"ATTACH 'ducklake:postgres:{pg_uri}' AS lake ("
               f"  DATA_PATH '{data_path}',"
-              f"  METADATA_SCHEMA '{schema}'"
+              f"  METADATA_SCHEMA '{schema}',"
+              f"  AUTOMATIC_MIGRATION TRUE"
               f")"
           )
           print(f"DuckLake initialized: schema={schema} data={data_path}")
@@ -383,13 +445,24 @@
           app.kubernetes.io/managed-by: civitas-goat-addon
       spec:
         backoffLimit: 3
+        # Hard cap so the LOAD/INSTALL fallback can't hang when an offline
+        # mirror is unreachable — activeDeadlineSeconds terminates the Job
+        # regardless of what DuckDB's C code is blocked on.
+        activeDeadlineSeconds: 300
         template:
           spec:
             restartPolicy: OnFailure
             containers:
               - name: init
-                image: "{{ goat_addon_software.images.ducklake_init.registry }}/{{ goat_addon_software.images.ducklake_init.repository }}:{{ goat_addon_software.images.ducklake_init.tag }}"
-                imagePullPolicy: "{{ goat_addon_software.images.ducklake_init.pullPolicy | default('IfNotPresent') }}"
+                # Run from the `processes` image so init.py uses the exact
+                # same DuckDB extension version as every runtime service that
+                # will later attach this catalog. Bootstrapping from a bare
+                # python image + `pip install duckdb==X` (the previous
+                # arrangement) decoupled catalog format from runtime version
+                # and produced hard `DuckLake catalog version mismatch`
+                # failures at first attach.
+                image: "{{ goat_addon_software.images.processes.registry }}/{{ goat_addon_software.images.processes.repository }}:{{ goat_addon_software.images.processes.tag }}"
+                imagePullPolicy: "{{ goat_addon_software.images.processes.pullPolicy | default('IfNotPresent') }}"
                 env:
                   - name: PG_HOST
                     value: "{{ goat_addon.db.central_db_name }}.{{ goat_addon.db.central_db_ns }}.svc.cluster.local"
@@ -413,16 +486,11 @@
                     value: "{{ goat_addon.minio.bucket }}"
                   - name: SCHEMA
                     value: "ducklake"
-                command: ["sh", "-c"]
-                args:
-                  - |
-                    set -e
-                    # Pin duckdb to match goatlib's `duckdb>=1.4.3` minimum:
-                    # newer duckdb versions ship a newer DuckLake extension
-                    # that creates catalogs geoapi's bundled goatlib can't
-                    # read ("Only DuckLake versions 0.1-0.3 are supported").
-                    pip install --quiet --no-cache-dir 'duckdb==1.4.3'
-                    python /scripts/init.py
+                # Explicit venv interpreter — the processes image builds into
+                # /venv (UV_PROJECT_ENVIRONMENT), and a bare `python` may
+                # resolve to the system interpreter that lacks duckdb.
+                command: ["/venv/bin/python"]
+                args: ["/scripts/init.py"]
                 volumeMounts:
                   - name: script
                     mountPath: /scripts
