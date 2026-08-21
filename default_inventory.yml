@@ -31,3 +31,21 @@ inv_addons:
       # routed by path (see templates/goat_values.yml). Used for Keycloak
       # redirect URIs and NextAuth NEXTAUTH_URL.
       public_url: "https://goat.{{ DOMAIN }}"
+    # Object storage. Default is a single-replica in-cluster MinIO deployed
+    # by this addon. To point at pre-existing S3-compatible storage
+    # (external MinIO, Cloudflare R2, Wasabi, Backblaze B2, or AWS S3),
+    # set `mode: external` and fill in the endpoint fields.
+    # Preconditions for external: `minio-credentials` Secret exists in the
+    # goat namespace with keys `access_key` and `secret_key`; the bucket
+    # exists (or is creatable with those creds); SigV4 region matches;
+    # path-style S3 is supported unless `force_path_style: false`.
+    # See README §External S3.
+    # s3:
+    #   bucket: "goat"
+    #   mode: "external"
+    #   endpoint: "http://minio.shared-minio.svc.cluster.local:9000"
+    #   public_endpoint: "https://s3.{{ DOMAIN }}"
+    #   region: "us-east-1"
+    #   # For real AWS S3:
+    #   # provider: "aws"
+    #   # force_path_style: false

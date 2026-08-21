@@ -1,13 +1,24 @@
 # /home/p4b/civitas-goat-addon/tasks/05_minio.yml
 ---
 # geoapi (and the chart's `processes` service when enabled) need S3-compatible
-# object storage to back the DuckLake data files. The GOAT chart doesn't ship
-# MinIO yet (planned for chart Phase 2/3 per Chart.yaml), and civitas-core
-# doesn't have a cluster-wide object store either. So we run a minimal
-# single-replica MinIO inside the goat namespace, with a bucket-create Job.
+# object storage to back the DuckLake data files. Two modes:
 #
-# Mirrors plan4better's compose.yaml topology (quay.io/minio images).
-# Single-replica + PVC = fine for local/dev; not HA, not for prod scale.
+#   * DEFAULT — this file deploys a minimal single-replica MinIO inside the
+#     goat namespace (bucket + credentials + public ingress). Mirrors
+#     plan4better's compose.yaml topology. Fine for local/dev; not HA, not
+#     for prod scale. The GOAT chart doesn't ship MinIO (planned for chart
+#     Phase 2/3 per Chart.yaml), and civitas-core doesn't have a cluster-wide
+#     object store either.
+#
+#   * EXTERNAL — when `goat_addon.s3.mode == 'external'`, every "MinIO
+#     server" block below is skipped and every S3-consuming Job
+#     (bucket-init, ducklake-init) is retargeted at the given endpoint.
+#     Works for any S3-compatible service: an existing MinIO elsewhere in
+#     the cluster, Cloudflare R2, Wasabi, Backblaze B2, or real AWS S3.
+#     Preconditions: `minio-credentials` Secret pre-created in the goat
+#     namespace with keys `access_key`/`secret_key`; endpoint reachable
+#     from the goat namespace; SigV4 region matches; path-style S3
+#     unless `force_path_style: false`. See README §External S3.
 
 # Shared DuckLake data volume. layer_import (worker-tools) writes parquet
 # under /app/data/ducklake/...; geoapi reads it for tile serving. Both must
@@ -43,18 +54,60 @@
           requests:
             storage: "{{ goat_addon.ducklake.pvc_size | default('20Gi') }}"
 
-- name: "GOAT addon: generate or reuse MinIO root credentials"
-  block:
-    - name: "GOAT addon: check for existing minio-credentials secret"
-      kubernetes.core.k8s_info:
-        kubeconfig: "{{ k8s_config }}"
-        context: "{{ k8s_context }}"
-        api_version: v1
-        kind: Secret
-        name: minio-credentials
-        namespace: "{{ goat_addon.namespace }}"
-      register: minio_existing
+# Schema preflight. `s3.mode` gates every branch below; fail cleanly on
+# unknown values rather than silently taking the default path.
+- name: "GOAT addon: preflight — s3.mode is supported"
+  ansible.builtin.assert:
+    that:
+      - goat_addon.s3.mode in ['in_cluster', 'external']
+    fail_msg: >-
+      goat_addon.s3.mode = '{{ goat_addon.s3.mode }}' but must be one of
+      'in_cluster' or 'external'. See vars/default.yml.
 
+# External mode preflight. Runs regardless of mode (the check is cheap and
+# the resulting `minio_existing` register is reused by the in_cluster
+# credentials block below). In external mode we hard-fail if the operator
+# hasn't pre-created the Secret — matches the "operator provides creds"
+# contract documented in the README.
+- name: "GOAT addon: check for existing minio-credentials secret"
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
+    api_version: v1
+    kind: Secret
+    name: minio-credentials
+    namespace: "{{ goat_addon.namespace }}"
+  register: minio_existing
+
+- name: "GOAT addon: preflight — external S3 endpoint config"
+  ansible.builtin.assert:
+    that:
+      - goat_addon.s3.endpoint | length > 0
+      - goat_addon.s3.public_endpoint | length > 0
+    fail_msg: >-
+      goat_addon.s3.mode = 'external' but endpoint / public_endpoint is
+      empty. Set both in inventory under inv_addons.goat.s3.
+  when: goat_addon.s3.mode == 'external'
+
+- name: "GOAT addon: preflight — external creds Secret exists"
+  ansible.builtin.assert:
+    that:
+      - minio_existing.resources | length > 0
+      - "'access_key' in (minio_existing.resources[0].data | default({}))"
+      - "'secret_key' in (minio_existing.resources[0].data | default({}))"
+    fail_msg: >-
+      goat_addon.s3.mode = 'external' but the `minio-credentials` Secret
+      is missing (or lacks `access_key`/`secret_key` keys) in namespace
+      `{{ goat_addon.namespace }}`. Create it before running the addon:
+      kubectl -n {{ goat_addon.namespace }} create secret generic
+      minio-credentials
+      --from-literal=access_key=<...>
+      --from-literal=secret_key=<...>
+  when: goat_addon.s3.mode == 'external'
+
+- name: "GOAT addon: generate or reuse MinIO root credentials"
+  when: goat_addon.s3.mode == 'in_cluster'
+  block:
     - name: "GOAT addon: reuse existing MinIO credentials"
       ansible.builtin.set_fact:
         minio_access_key: "{{ minio_existing.resources[0].data.access_key | b64decode }}"
@@ -84,8 +137,10 @@
       stringData:
         access_key: "{{ minio_access_key }}"
         secret_key: "{{ minio_secret_key }}"
+  when: goat_addon.s3.mode == 'in_cluster'
 
 - name: "GOAT addon: deploy MinIO (server + PVC + service)"
+  when: goat_addon.s3.mode == 'in_cluster'
   kubernetes.core.k8s:
     kubeconfig: "{{ k8s_config }}"
     context: "{{ k8s_context }}"
@@ -178,9 +233,10 @@
 # TLS secret as the goat_values.yml ingresses — one hostname cannot be
 # served by multiple secrets.
 - name: "GOAT addon: derive goat_host + S3 ingress path from inventory"
+  when: goat_addon.s3.mode == 'in_cluster'
   ansible.builtin.set_fact:
     goat_host: "{{ goat_addon.web.public_url | regex_replace('^https?://', '') }}"
-    s3_ingress_path: "/{{ goat_addon.minio.bucket }}"
+    s3_ingress_path: "/{{ goat_addon.s3.bucket }}"
     s3_tls_secret_name: "goat-{{ DOMAIN }}-tls"
 
 # nginx: default request body limit is 1 MB and default read/send timeouts
@@ -193,6 +249,7 @@
 # `set_fact` preserves the dict type only when the whole value is a single
 # `{{ expr }}` — do NOT use `>-` here, that folds to a string.
 - name: "GOAT addon: build MinIO ingress annotations for {{ inv_k8s.ingress_class }}"
+  when: goat_addon.s3.mode == 'in_cluster'
   ansible.builtin.set_fact:
     minio_ingress_annotations: "{{ minio_base_annotations | combine(minio_nginx_annotations if inv_k8s.ingress_class == 'nginx' else {}) }}"
   vars:
@@ -206,14 +263,16 @@
       nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
 
 - name: "GOAT addon: assert S3 ingress path matches bucket name"
+  when: goat_addon.s3.mode == 'in_cluster'
   ansible.builtin.assert:
     that:
-      - s3_ingress_path == '/' + goat_addon.minio.bucket
+      - s3_ingress_path == '/' + goat_addon.s3.bucket
     fail_msg: >-
       The MinIO ingress path must equal '/' + the bucket name, otherwise
       path-style presigned URL signatures will not validate.
 
 - name: "GOAT addon: deploy MinIO public ingress (for browser uploads)"
+  when: goat_addon.s3.mode == 'in_cluster'
   kubernetes.core.k8s:
     state: present
     kubeconfig: "{{ k8s_config }}"
@@ -245,6 +304,7 @@
                       port: { number: 9000 }
 
 - name: "GOAT addon: wait for MinIO to be ready"
+  when: goat_addon.s3.mode == 'in_cluster'
   kubernetes.core.k8s_info:
     kubeconfig: "{{ k8s_config }}"
     context: "{{ k8s_context }}"
@@ -257,6 +317,43 @@
       type: Available
       status: "True"
     wait_timeout: 180
+
+# Shared S3 endpoint facts for the bucket-init and ducklake-init Jobs. In
+# in_cluster mode these resolve to the in-namespace Service; in external
+# mode they resolve to the operator-supplied endpoint.
+#
+#   * s3_job_endpoint_url  — full URL for `mc alias set` (with scheme,
+#                            no trailing slash)
+#   * s3_job_hostport      — host:port for DuckDB's `s3_endpoint` (no
+#                            scheme, no trailing slash)
+#   * s3_job_use_ssl       — 'true'/'false' string for DuckDB `s3_use_ssl`
+#   * s3_job_url_style     — 'path' or 'vhost' for DuckDB `s3_url_style`
+#
+# `| trim` guards against surrounding whitespace from YAML folding of the
+# `>-` block; trailing-slash strip guards against operator-supplied
+# endpoints like `https://s3.example.com/`.
+- name: "GOAT addon: resolve S3 endpoint facts for bucket-init and ducklake-init Jobs"
+  ansible.builtin.set_fact:
+    s3_job_endpoint_url: >-
+      {{ (goat_addon.s3.endpoint
+          if goat_addon.s3.mode == 'external'
+          else 'http://minio.' + goat_addon.namespace + '.svc.cluster.local:9000')
+         | trim | regex_replace('/+$', '') }}
+    s3_job_hostport: >-
+      {{ (goat_addon.s3.endpoint
+          if goat_addon.s3.mode == 'external'
+          else 'http://minio.' + goat_addon.namespace + '.svc.cluster.local:9000')
+         | trim | regex_replace('/+$', '') | regex_replace('^https?://', '') }}
+    s3_job_use_ssl: >-
+      {{ ('true'
+          if (goat_addon.s3.mode == 'external'
+              and goat_addon.s3.endpoint.startswith('https://'))
+          else 'false') | trim }}
+    s3_job_url_style: >-
+      {{ ('vhost'
+          if (goat_addon.s3.mode == 'external'
+              and not goat_addon.s3.force_path_style)
+          else 'path') | trim }}
 
 # `mc mb` is idempotent — re-running the Job is safe but wastes pod scheduling
 # time. We delete any prior bucket-init Job (Job specs are immutable; can't
@@ -272,7 +369,7 @@
     namespace: "{{ goat_addon.namespace }}"
     wait: true
 
-- name: "GOAT addon: create goat bucket in MinIO"
+- name: "GOAT addon: create goat bucket in S3"
   kubernetes.core.k8s:
     kubeconfig: "{{ k8s_config }}"
     context: "{{ k8s_context }}"
@@ -295,6 +392,10 @@
                 image: "{{ goat_addon_software.images.minio_mc.registry }}/{{ goat_addon_software.images.minio_mc.repository }}:{{ goat_addon_software.images.minio_mc.tag }}"
                 imagePullPolicy: "{{ goat_addon_software.images.minio_mc.pullPolicy | default('IfNotPresent') }}"
                 env:
+                  # Endpoint for `mc alias set`. Internal mode → in-cluster
+                  # MinIO Service; external mode → operator-supplied endpoint.
+                  - name: MC_ENDPOINT
+                    value: "{{ s3_job_endpoint_url }}"
                   - name: MC_ACCESS_KEY
                     valueFrom:
                       secretKeyRef: { name: minio-credentials, key: access_key }
@@ -305,9 +406,9 @@
                 args:
                   - |
                     set -euo pipefail
-                    mc alias set goat http://minio:9000 "$MC_ACCESS_KEY" "$MC_SECRET_KEY"
-                    mc mb --ignore-existing goat/{{ goat_addon.minio.bucket }}
-                    echo "bucket goat/{{ goat_addon.minio.bucket }} ready"
+                    mc alias set goat "$MC_ENDPOINT" "$MC_ACCESS_KEY" "$MC_SECRET_KEY"
+                    mc mb --ignore-existing goat/{{ goat_addon.s3.bucket }}
+                    echo "bucket goat/{{ goat_addon.s3.bucket }} ready at $MC_ENDPOINT"
 
 - name: "GOAT addon: wait for bucket-init Job to complete"
   kubernetes.core.k8s_info:
@@ -384,8 +485,17 @@
           con.execute("SET s3_endpoint = ?;", [os.environ["S3_ENDPOINT"]])
           con.execute("SET s3_access_key_id = ?;", [os.environ["S3_KEY"]])
           con.execute("SET s3_secret_access_key = ?;", [os.environ["S3_SECRET"]])
-          con.execute("SET s3_url_style = 'path';")
-          con.execute("SET s3_use_ssl = false;")
+          # SET only takes literal booleans / strings, not bind params.
+          # Values are inventory-derived (not user input), and s3_url_style
+          # is whitelisted so the interpolation is safe.
+          url_style = os.environ.get("S3_URL_STYLE", "path")
+          if url_style not in ("path", "vhost"):
+              raise ValueError(
+                  f"S3_URL_STYLE must be 'path' or 'vhost', got: {url_style!r}"
+              )
+          con.execute(f"SET s3_url_style = '{url_style}';")
+          use_ssl = os.environ.get("S3_USE_SSL", "false").lower() == "true"
+          con.execute(f"SET s3_use_ssl = {'true' if use_ssl else 'false'};")
 
           pg_uri = (
               f"host={os.environ['PG_HOST']} port=5432 "
@@ -475,7 +585,11 @@
                   - name: PG_DB
                     value: "{{ goat_addon.db.goat_db_name }}"
                   - name: S3_ENDPOINT
-                    value: "minio.{{ goat_addon.namespace }}.svc.cluster.local:9000"
+                    value: "{{ s3_job_hostport }}"
+                  - name: S3_USE_SSL
+                    value: "{{ s3_job_use_ssl }}"
+                  - name: S3_URL_STYLE
+                    value: "{{ s3_job_url_style }}"
                   - name: S3_KEY
                     valueFrom:
                       secretKeyRef: { name: minio-credentials, key: access_key }
@@ -483,7 +597,7 @@
                     valueFrom:
                       secretKeyRef: { name: minio-credentials, key: secret_key }
                   - name: BUCKET
-                    value: "{{ goat_addon.minio.bucket }}"
+                    value: "{{ goat_addon.s3.bucket }}"
                   - name: SCHEMA
                     value: "ducklake"
                 # Explicit venv interpreter — the processes image builds into

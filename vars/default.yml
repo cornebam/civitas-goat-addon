@@ -34,9 +34,46 @@ goat_addon:
     # Public URL of the GOAT web frontend. Used for Keycloak redirect URIs
     # and NEXTAUTH_URL. Defaults to https://goat.<DOMAIN>.
     public_url: "{{ inv_addons.goat.web.public_url | default('https://goat.' + DOMAIN) }}"
-  minio:
-    # MinIO bucket name. DuckLake parquet files + uploaded assets land here.
-    bucket: "{{ inv_addons.goat.minio.bucket | default('goat') }}"
+  s3:
+    # Bucket name. DuckLake parquet files + uploaded assets land here. Same
+    # key regardless of whether the object store is the in-cluster MinIO
+    # (default) or an external S3-compatible endpoint (see `mode` below).
+    bucket: "{{ inv_addons.goat.s3.bucket | default('goat') }}"
+    # Deployment mode:
+    #   * `in_cluster` (default) — the addon deploys a single-replica MinIO
+    #     in the goat namespace (Deployment + PVC + Service + Ingress) and
+    #     generates root credentials. Fine for local/dev; not HA.
+    #   * `external` — the addon skips every in-namespace MinIO resource and
+    #     points every S3-consuming service (goat-core, geoapi, processes,
+    #     both windmill workers, DuckLake bootstrap) at `endpoint` below.
+    #     Works for any S3-compatible service: a pre-existing MinIO
+    #     elsewhere in the cluster, Cloudflare R2, Wasabi, Backblaze B2, or
+    #     real AWS S3 — see `provider` / `force_path_style` for AWS.
+    #
+    # Preconditions when mode == 'external':
+    #   * A `minio-credentials` Secret already exists in goat_addon.namespace
+    #     with keys `access_key` and `secret_key` (no cross-ns mirroring).
+    #   * `endpoint` + `public_endpoint` set below.
+    #   * The endpoint is reachable from the goat namespace.
+    #   * SigV4 `region` matches how the target signs.
+    #   * If `force_path_style: true` (default), the endpoint must support
+    #     path-style S3.
+    mode: "{{ inv_addons.goat.s3.mode | default('in_cluster') }}"
+    # External-mode endpoints. Ignored when mode == 'in_cluster'.
+    endpoint: "{{ inv_addons.goat.s3.endpoint | default('') }}"
+    public_endpoint: "{{ inv_addons.goat.s3.public_endpoint | default('') }}"
+    # Runtime S3 settings — applied in both modes.
+    region: "{{ inv_addons.goat.s3.region | default('us-east-1') }}"
+    # `S3_PROVIDER` passed to goat-core / geoapi / processes / windmill
+    # workers. Default `minio` matches historical behavior. Set `aws` for
+    # real AWS S3 (goat-core's config.py branches on this).
+    provider: "{{ inv_addons.goat.s3.provider | default('minio') }}"
+    # Path-style vs virtual-hosted-style S3 URLs. Kept as a native bool
+    # here; templates stringify at the point of use. MinIO / R2 / Wasabi /
+    # Backblaze support path-style — keep true. AWS S3 has been deprecating
+    # path-style since 2020 and buckets created after that in some regions
+    # require virtual-hosted-style — set false.
+    force_path_style: "{{ inv_addons.goat.s3.force_path_style | default(true) | bool }}"
   ducklake:
     pvc_size: "{{ inv_addons.goat.ducklake.pvc_size | default('20Gi') }}"
     # RWX for real multi-node clusters; local-path (k3d/k3s default) cannot

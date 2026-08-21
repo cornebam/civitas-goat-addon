@@ -1,6 +1,6 @@
 # civitas-goat-addon
 
-[CIVITAS/CORE](https://docs.core.civitasconnect.digital/) Ansible addon that installs the [GOAT](https://github.com/plan4better/goat) Helm chart and wires it to civitas's own Postgres (central-db), MinIO (deployed by this addon) and Keycloak realm.
+[CIVITAS/CORE](https://docs.core.civitasconnect.digital/) Ansible addon that installs the [GOAT](https://github.com/plan4better/goat) Helm chart and wires it to civitas's own Postgres (central-db), S3-compatible object storage (an in-cluster MinIO deployed by this addon by default, or any external S3 endpoint — see §External S3), and Keycloak realm.
 
 ## Status
 
@@ -9,7 +9,7 @@ Installs the GOAT Helm chart (`oci://ghcr.io/plan4better/charts/goat` v0.4.x) in
 - `<env>-goat-stack` namespace + civitas CA mirroring
 - `goat` + `windmill` databases provisioned in civitas's central-db (Zalando `preparedDatabases` patch)
 - Keycloak `goat-web` OIDC client in the civitas realm (idempotent)
-- MinIO deployment + bucket + DuckLake catalog bootstrap
+- MinIO deployment + bucket + DuckLake catalog bootstrap (or wired to an existing S3 endpoint — see [External S3](#external-s3-compatible-object-storage))
 - Helm install of GOAT (core, web, geoapi, processes, windmill server + 4 workers, redis)
 - All GOAT images pinned to a single release tag (`inv_addons.goat.release`) — see [Versioning](#versioning)
 
@@ -93,12 +93,59 @@ inv_addons:
       # Public-facing URL of the whole goat stack. Everything is served
       # from this hostname and routed by path prefix — see Routing table.
       public_url: "https://goat.{{ DOMAIN }}"
-    minio:
-      # Bucket name. Also the path prefix on the MinIO ingress: presigned
-      # URLs are path-style, so any deviation from `/<bucket>` breaks
-      # SigV4 signatures.
+    s3:
+      # Bucket name. Also the path prefix on the in-cluster MinIO ingress:
+      # presigned URLs are path-style, so any deviation from `/<bucket>`
+      # breaks SigV4 signatures.
       bucket: "goat"
+      # Deployment mode. `in_cluster` (default) deploys the addon's own
+      # single-replica MinIO. `external` points at any pre-existing
+      # S3-compatible endpoint (external MinIO, R2, Wasabi, B2, AWS S3).
+      # See §External S3.
+      mode: "in_cluster"
+      # External-mode fields — required when mode: external.
+      endpoint: ""            # http(s)://... cluster-visible (in-pod code)
+      public_endpoint: ""     # https://... browser-visible (presigned URLs)
+      # Runtime S3 settings — used in both modes.
+      region: "us-east-1"
+      provider: "minio"       # or "aws" — passed through as S3_PROVIDER
+      force_path_style: true
 ```
+
+### External S3-compatible object storage
+
+Set `inv_addons.goat.s3.mode: external` to skip the addon's in-cluster MinIO Deployment/Service/Ingress and point every S3-consuming service (goat-core, geoapi, processes, both windmill workers, DuckLake bootstrap) at a pre-existing endpoint. Works for any S3-compatible service: MinIO elsewhere in the cluster, Cloudflare R2, Wasabi, Backblaze B2, or real AWS S3.
+
+```yaml
+inv_addons:
+  goat:
+    s3:
+      bucket: "goat"
+      mode: "external"
+      endpoint: "https://s3.eu-central-1.amazonaws.com"
+      public_endpoint: "https://goat.s3.eu-central-1.amazonaws.com"
+      region: "eu-central-1"
+      provider: "aws"
+      force_path_style: false
+```
+
+Preconditions (all asserted at addon start when `mode: external`):
+
+1. **`minio-credentials` Secret pre-exists** in the goat namespace with keys `access_key` and `secret_key`. The addon does not fetch or mirror credentials from anywhere else — the operator creates it:
+   ```sh
+   kubectl -n <env>-goat-stack create secret generic minio-credentials \
+     --from-literal=access_key=<...> --from-literal=secret_key=<...>
+   ```
+2. **Bucket** identified by `s3.bucket` either already exists or is creatable by those credentials (the bucket-init Job still runs and `mc mb --ignore-existing`).
+3. **`endpoint`** is reachable from the goat namespace (in-cluster DNS or public network). Used by boto3 / DuckDB / `mc` inside pods.
+4. **`public_endpoint`** is reachable from the browser. Substituted into presigned URLs returned by goat-core. Must serve the bucket at `/<bucket>` when `force_path_style: true`, or as `<bucket>.<host>` when `force_path_style: false` — SigV4 signs the canonical URI, so any URI rewrite en route breaks signatures.
+5. **`region`** matches how SigV4 is signed on the target. AWS S3 requires the bucket's actual region; MinIO / R2 / etc. usually accept any value but should match what the endpoint advertises.
+6. **`force_path_style`**: `true` (default) works for MinIO / R2 / Wasabi / Backblaze B2. Real AWS S3 has been deprecating path-style since 2020 and buckets created in some regions after that date only accept virtual-hosted-style — set `false`.
+7. **`provider`**: passed through as `S3_PROVIDER` to goat-core / geoapi / processes / windmill workers. Default `minio` matches historical behavior; set `aws` for real AWS S3 if goat-core's config.py branches on it.
+
+**DuckLake catalog binding.** The DuckLake catalog metadata (Postgres `ducklake.*` tables) stores the S3 endpoint written at bootstrap. Switching `endpoint` on an existing install leaves the catalog pointing at the old location; the addon's DuckLake init sets `AUTOMATIC_MIGRATION TRUE` on ATTACH which handles catalog *format* upgrades, but not endpoint relocation. Treat endpoint changes as a re-bootstrap.
+
+**Cost of leftover state.** Switching from `in_cluster` → `external` does not delete the in-cluster MinIO Deployment/PVC/Service/Ingress if they already exist from a prior run. Delete manually (`kubectl -n <env>-goat-stack delete deploy,svc,ingress,pvc minio minio-data`) to reclaim the disk.
 
 ## How to use
 

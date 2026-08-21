@@ -18,6 +18,32 @@
 # hostname cannot be served by multiple secrets.
 {%- set goat_host = goat_addon.web.public_url | regex_replace('^https?://', '') %}
 {%- set s3_tls_secret_name = 'goat-' + DOMAIN + '-tls' %}
+{#- S3 endpoint resolution. When `goat_addon.s3.mode == 'external'`, every
+    chart service (goat-core / geoapi / processes / windmill worker-tools /
+    workflows) points at the external S3-compatible endpoint (external
+    MinIO, Cloudflare R2, Wasabi, Backblaze B2, AWS S3, …); otherwise at
+    the in-namespace MinIO deployed by tasks/05_minio.yml.
+
+    `s3_internal_endpoint` is the cluster-internal URL used by in-pod
+    boto3 / DuckDB. `s3_public_endpoint` is the browser-facing URL
+    substituted into presigned URLs — for the default MinIO it's the
+    /<bucket> path on `goat_host`; for external services it's whatever
+    the operator's inventory says (e.g. AWS S3 hostname, or an internal
+    reverse proxy). `s3_endpoint_hostport` strips the scheme (and any
+    trailing slash) because DuckDB's `s3_endpoint` setting wants host:port
+    only. `s3_use_ssl` / `s3_url_style` are the DuckDB-shaped equivalents
+    of `S3_ENDPOINT_URL` scheme + `S3_FORCE_PATH_STYLE`. #}
+{%- set _s3 = goat_addon.s3 %}
+{%- set s3_external = (_s3.mode == 'external') %}
+{%- set s3_provider = _s3.provider %}
+{%- set s3_internal_endpoint = _s3.endpoint if s3_external else 'http://minio.' + goat_addon.namespace + '.svc.cluster.local:9000' %}
+{%- set s3_public_endpoint = _s3.public_endpoint if s3_external else 'https://' + goat_host %}
+{%- set s3_region = _s3.region %}
+{%- set s3_force_path_style = _s3.force_path_style %}
+{%- set s3_force_path_style_str = 'true' if s3_force_path_style else 'false' %}
+{%- set s3_endpoint_hostport = s3_internal_endpoint | regex_replace('/+$', '') | regex_replace('^https?://', '') %}
+{%- set s3_use_ssl = 'true' if s3_internal_endpoint.startswith('https://') else 'false' %}
+{%- set s3_url_style = 'path' if s3_force_path_style else 'vhost' %}
 {#- Ingress routing profile for geoapi and processes. See
     goat_addon.ingress.profiles in vars/default.yml for the schema and
     the strategic note on why this exists. `is_nginx` gates annotations
@@ -96,10 +122,11 @@ core:
   #   - S3_ENDPOINT_URL        — used by boto3 in-cluster (HTTP, internal)
   #   - S3_PUBLIC_ENDPOINT_URL — substituted into presigned URLs returned to
   #     the browser; must be HTTPS so the SPA's fetch isn't mixed-content
-  #     blocked. Presigned URLs are path-style (S3_FORCE_PATH_STYLE=true),
-  #     so the browser hits `https://<goat_host>/<bucket>/…` which routes
-  #     to MinIO via the ingress in 05_minio.yml. See goat/apps/core/src/
-  #     core/services/s3.py.
+  #     blocked. With path-style S3 (S3_FORCE_PATH_STYLE=true, default) the
+  #     browser hits `<S3_PUBLIC_ENDPOINT_URL>/<bucket>/…` — for the default
+  #     in-namespace MinIO that's `https://<goat_host>/<bucket>/…` (routed
+  #     via the ingress in 05_minio.yml); for external S3 it's whatever the
+  #     provider serves. See goat/apps/core/src/core/services/s3.py.
   config:
     ENVIRONMENT: prod
     # API mounted at /core; goat-core reads API_V2_STR (BaseSettings, no
@@ -108,12 +135,12 @@ core:
     # NEXT_PUBLIC_API_URL when building URLs.
     API_V2_STR: "/core/api/v2"
     CLIENT_URL: "https://{{ goat_host }}"
-    S3_PROVIDER: "minio"
-    S3_ENDPOINT_URL: "http://minio.{{ goat_addon.namespace }}.svc.cluster.local:9000"
-    S3_PUBLIC_ENDPOINT_URL: "https://{{ goat_host }}"
-    S3_REGION: "us-east-1"
-    S3_BUCKET_NAME: "{{ goat_addon.minio.bucket }}"
-    S3_FORCE_PATH_STYLE: "true"
+    S3_PROVIDER: "{{ s3_provider }}"
+    S3_ENDPOINT_URL: "{{ s3_internal_endpoint }}"
+    S3_PUBLIC_ENDPOINT_URL: "{{ s3_public_endpoint }}"
+    S3_REGION: "{{ s3_region }}"
+    S3_BUCKET_NAME: "{{ goat_addon.s3.bucket }}"
+    S3_FORCE_PATH_STYLE: "{{ s3_force_path_style_str }}"
     # Default org plan + quotas. These feed SELF_HOSTED_PLAN_METADATA in
     # apps/core/src/core/crud/crud_organization.py, which is the branch
     # taken when Stripe billing is not configured.
@@ -161,11 +188,12 @@ geoapi:
     # even with S3 enabled — DuckLake stores parquet in S3 transparently via
     # the s3_* SET commands; the local path is just the catalog marker.
     DUCKLAKE_DATA_DIR: "/app/data/ducklake"
-    # S3 (MinIO inside the goat namespace — see tasks/05_minio.yml)
-    S3_PROVIDER: "minio"
-    S3_ENDPOINT_URL: "http://minio.{{ goat_addon.namespace }}.svc.cluster.local:9000"
-    S3_REGION: "us-east-1"
-    S3_BUCKET_NAME: "{{ goat_addon.minio.bucket }}"
+    # S3 endpoint. Default: the in-namespace MinIO (05_minio.yml). When
+    # goat_addon.s3.mode == 'external' → any S3-compatible endpoint.
+    S3_PROVIDER: "{{ s3_provider }}"
+    S3_ENDPOINT_URL: "{{ s3_internal_endpoint }}"
+    S3_REGION: "{{ s3_region }}"
+    S3_BUCKET_NAME: "{{ goat_addon.s3.bucket }}"
   extraEnv:
     # Python requests/httpx/urllib use these envs to find a CA bundle.
     - name: REQUESTS_CA_BUNDLE
@@ -235,12 +263,20 @@ processes:
     DUCKLAKE_DATA_DIR: "/app/data/ducklake"
     # processes' config.py declares BOTH S3_* (boto3-style) AND DUCKLAKE_S3_*
     # (consumed by goatlib's DuckLake managers via getattr on settings).
-    S3_PROVIDER: "minio"
-    S3_ENDPOINT_URL: "http://minio.{{ goat_addon.namespace }}.svc.cluster.local:9000"
-    S3_REGION: "us-east-1"
-    S3_BUCKET_NAME: "{{ goat_addon.minio.bucket }}"
-    DUCKLAKE_S3_ENDPOINT: "minio.{{ goat_addon.namespace }}.svc.cluster.local:9000"
-    DUCKLAKE_S3_BUCKET: "{{ goat_addon.minio.bucket }}"
+    S3_PROVIDER: "{{ s3_provider }}"
+    S3_ENDPOINT_URL: "{{ s3_internal_endpoint }}"
+    S3_REGION: "{{ s3_region }}"
+    S3_BUCKET_NAME: "{{ goat_addon.s3.bucket }}"
+    # DuckDB's `s3_endpoint` setting wants host:port only, no scheme; SSL
+    # + URL style are separate settings. `region` matters for AWS S3
+    # outside us-east-1 (SigV4 canonicalization). Keep the full set of
+    # DUCKLAKE_S3_* here in sync with the ducklake-init Job env in
+    # tasks/05_minio.yml so runtime attaches match what bootstrap wrote.
+    DUCKLAKE_S3_ENDPOINT: "{{ s3_endpoint_hostport }}"
+    DUCKLAKE_S3_BUCKET: "{{ goat_addon.s3.bucket }}"
+    DUCKLAKE_S3_REGION: "{{ s3_region }}"
+    DUCKLAKE_S3_USE_SSL: "{{ s3_use_ssl }}"
+    DUCKLAKE_S3_URL_STYLE: "{{ s3_url_style }}"
     WINDMILL_URL: "http://goat-windmill-server"
     # Must match chart's `windmill.bootstrap.workspace` (default `goat`).
     WINDMILL_WORKSPACE: "goat"
@@ -480,11 +516,11 @@ windmill:
         POSTGRES_SERVER: "{{ goat_addon.db.central_db_name }}.{{ goat_addon.db.central_db_ns }}.svc.cluster.local"
         POSTGRES_PORT: "5432"
         POSTGRES_DB: "{{ goat_addon.db.goat_db_name }}"
-        S3_PROVIDER: "minio"
-        S3_ENDPOINT_URL: "http://minio.{{ goat_addon.namespace }}.svc.cluster.local:9000"
-        S3_PUBLIC_ENDPOINT_URL: "https://{{ goat_host }}"
-        S3_REGION: "us-east-1"
-        S3_BUCKET_NAME: "{{ goat_addon.minio.bucket }}"
+        S3_PROVIDER: "{{ s3_provider }}"
+        S3_ENDPOINT_URL: "{{ s3_internal_endpoint }}"
+        S3_PUBLIC_ENDPOINT_URL: "{{ s3_public_endpoint }}"
+        S3_REGION: "{{ s3_region }}"
+        S3_BUCKET_NAME: "{{ goat_addon.s3.bucket }}"
         DUCKLAKE_CATALOG_SCHEMA: "ducklake"
         DUCKLAKE_DATA_DIR: "/app/data/ducklake"
         CUSTOMER_SCHEMA: "customer"
@@ -521,11 +557,11 @@ windmill:
         POSTGRES_SERVER: "{{ goat_addon.db.central_db_name }}.{{ goat_addon.db.central_db_ns }}.svc.cluster.local"
         POSTGRES_PORT: "5432"
         POSTGRES_DB: "{{ goat_addon.db.goat_db_name }}"
-        S3_PROVIDER: "minio"
-        S3_ENDPOINT_URL: "http://minio.{{ goat_addon.namespace }}.svc.cluster.local:9000"
-        S3_PUBLIC_ENDPOINT_URL: "https://{{ goat_host }}"
-        S3_REGION: "us-east-1"
-        S3_BUCKET_NAME: "{{ goat_addon.minio.bucket }}"
+        S3_PROVIDER: "{{ s3_provider }}"
+        S3_ENDPOINT_URL: "{{ s3_internal_endpoint }}"
+        S3_PUBLIC_ENDPOINT_URL: "{{ s3_public_endpoint }}"
+        S3_REGION: "{{ s3_region }}"
+        S3_BUCKET_NAME: "{{ goat_addon.s3.bucket }}"
         DUCKLAKE_CATALOG_SCHEMA: "ducklake"
         DUCKLAKE_DATA_DIR: "/app/data/ducklake"
         CUSTOMER_SCHEMA: "customer"
