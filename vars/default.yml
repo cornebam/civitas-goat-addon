@@ -14,8 +14,8 @@ goat_addon:
   # addon pulls. Set in vars/software_references.yml; surfaced here so
   # inventory can still override per-deployment without forking the file.
   chart:
-    ref: "{{ inv_addons.goat.chart.ref | default(goat_addon_software.helm_repo_url + '/' + goat_addon_software.helm_chart_name) }}"
-    version: "{{ inv_addons.goat.chart.version | default(goat_addon_software.helm_chart_version) }}"
+    ref: "{{ inv_addons.goat.chart.ref | default(software.addon_goat.helm_repo_url + '/' + software.addon_goat.helm_chart_name) }}"
+    version: "{{ inv_addons.goat.chart.version | default(software.addon_goat.helm_chart_version) }}"
   db:
     central_db_ns: "{{ inv_central_db.ns_name }}"
     central_db_name: "central-db"

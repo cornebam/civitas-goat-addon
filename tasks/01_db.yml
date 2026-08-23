@@ -29,7 +29,7 @@
 # install.
 - name: Pre-flight check — central-db has enough memory headroom for goat
   vars:
-    central_db_mem_limit: "{{ inv_central_db.resources.limits.memory | default('500Mi') }}"
+    central_db_mem_limit: "{{ inv_central_db.resources.limits.memory | default('5Gi') }}"
     # Treat the suffix-stripped int as MiB approximation; Gi/Mi are the only
     # units civitas-core uses in practice.
     central_db_mem_mib: >-
@@ -153,19 +153,37 @@
       - "spilo-role=master"
   register: central_db_master
 
-# Zalando creates the owner-user secret before the database is reachable
-# sometimes. Wait until psql can connect to the windmill DB before granting.
 - name: Wait for windmill database to be queryable
-  ansible.builtin.command:
-    cmd: >-
-      kubectl -n {{ goat_addon.db.central_db_ns }}
-      exec {{ central_db_master.resources[0].metadata.name }} -c postgres --
-      psql -U postgres -d {{ goat_addon.db.windmill_db_name }} -tc "SELECT 1"
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
+    namespace: "{{ goat_addon.db.central_db_ns }}"
+    pod: "{{ central_db_master.resources[0].metadata.name }}"
+    container: postgres
+    command: >-
+      psql -U {{ goat_addon.db.windmill_db_name }}_owner_user
+      -d {{ goat_addon.db.windmill_db_name }}
+      -tAc "SELECT 1"
   register: windmill_db_ping
   changed_when: false
+  failed_when: false
   retries: 30
   delay: 5
-  until: windmill_db_ping.rc == 0
+  until: windmill_db_ping.return_code | default(1) == 0
+
+# Zalando creates the owner-user secret before the database is reachable
+# sometimes. Wait until psql can connect to the windmill DB before granting.
+#- name: Wait for windmill database to be queryable
+#  ansible.builtin.command:
+#    cmd: >-
+#      kubectl -n {{ goat_addon.db.central_db_ns }}
+#      exec {{ central_db_master.resources[0].metadata.name }} -c postgres --
+#      psql -U {{ goat_addon.db.windmill_db_name }}_owner_user -d {{ goat_addon.db.windmill_db_name }} -tc "SELECT 1"
+#  register: windmill_db_ping
+#  changed_when: false
+#  retries: 30
+#  delay: 5
+#  until: windmill_db_ping.rc == 0
 
 # Civitas's spilo installs uuid-ossp in the `extensions` schema (per the
 # central-db convention), not `public`. Goat's alembic migration calls
@@ -173,53 +191,131 @@
 # include `extensions` for those calls to resolve. Without this, the first
 # CREATE TABLE with a UUID DEFAULT fails with "function uuid_generate_v4()
 # does not exist".
+
 - name: Wait for goat database to be queryable
-  ansible.builtin.command:
-    cmd: >-
-      kubectl -n {{ goat_addon.db.central_db_ns }}
-      exec {{ central_db_master.resources[0].metadata.name }} -c postgres --
-      psql -U postgres -d {{ goat_addon.db.goat_db_name }} -tc "SELECT 1"
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
+    namespace: "{{ goat_addon.db.central_db_ns }}"
+    pod: "{{ central_db_master.resources[0].metadata.name }}"
+    container: postgres
+    command: >-
+      psql -U {{ goat_addon.db.goat_db_name }}_owner_user
+      -d {{ goat_addon.db.goat_db_name }}
+      -tAc "SELECT 1"
   register: goat_db_ping
   changed_when: false
+  failed_when: false
   retries: 30
   delay: 5
-  until: goat_db_ping.rc == 0
+  until: goat_db_ping.return_code | default(1) == 0
+
+
+#- name: Wait for goat database to be queryable
+#  ansible.builtin.command:
+#    cmd: >-
+#      kubectl -n {{ goat_addon.db.central_db_ns }}
+#      exec {{ central_db_master.resources[0].metadata.name }} -c postgres --
+#      psql -U {{ goat_addon.db.goat_db_name }}_owner_user -d {{ goat_addon.db.goat_db_name }} -tc "SELECT 1"
+#  register: goat_db_ping
+#  changed_when: false
+#  retries: 30
+#  delay: 5
+#  until: goat_db_ping.rc == 0
+
+#- name: "Set up goat prereqs (search_path to resolve uuid-ossp in extensions schema)"
+#  ansible.builtin.command:
+#    cmd: >-
+#      kubectl -n {{ goat_addon.db.central_db_ns }}
+#      exec {{ central_db_master.resources[0].metadata.name }} -c postgres --
+#      psql -U {{ goat_addon.db.goat_db_name }}_owner_user -d {{ goat_addon.db.goat_db_name }} -v ON_ERROR_STOP=1 -c
+#      "ALTER ROLE {{ goat_addon.db.goat_db_name }}_owner_user IN DATABASE {{ goat_addon.db.goat_db_name }} SET search_path = data, public, extensions; GRANT USAGE ON SCHEMA extensions TO PUBLIC;"
+#  changed_when: false
 
 - name: "Set up goat prereqs (search_path to resolve uuid-ossp in extensions schema)"
-  ansible.builtin.command:
-    cmd: >-
-      kubectl -n {{ goat_addon.db.central_db_ns }}
-      exec {{ central_db_master.resources[0].metadata.name }} -c postgres --
-      psql -U postgres -d {{ goat_addon.db.goat_db_name }} -v ON_ERROR_STOP=1 -c
-      "CREATE SCHEMA IF NOT EXISTS extensions; CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" WITH SCHEMA extensions; ALTER ROLE {{ goat_addon.db.goat_db_name }}_owner_user IN DATABASE {{ goat_addon.db.goat_db_name }} SET search_path = data, public, extensions; GRANT USAGE ON SCHEMA extensions TO PUBLIC;"
+  vars:
+    goat_prereq_sql: |
+      CREATE SCHEMA IF NOT EXISTS extensions;
+      CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA extensions;
+      ALTER ROLE {{ goat_addon.db.goat_db_name }}_owner_user
+        IN DATABASE {{ goat_addon.db.goat_db_name }}
+        SET search_path = data, public, extensions;
+      GRANT USAGE ON SCHEMA extensions TO PUBLIC;
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
+    namespace: "{{ goat_addon.db.central_db_ns }}"
+    pod: "{{ central_db_master.resources[0].metadata.name }}"
+    container: postgres
+    command: >-
+      psql -U {{ goat_addon.db.goat_db_name }}_owner_user
+      -d {{ goat_addon.db.goat_db_name }}
+      -v ON_ERROR_STOP=1 --single-transaction
+      -c {{ goat_prereq_sql | quote }}
   changed_when: false
 
-- name: "Set up windmill prereqs (roles, search_path, drop stray `data` schema)"
-  ansible.builtin.command:
-    # NB: the role names `windmill_admin` and `windmill_user` are HARDCODED by
-    # windmill's own migrations — they don't follow the DB name. The
-    # Zalando-derived `<db>_owner_user` does follow the DB name, hence the
+#- name: "Set up windmill prereqs (roles, search_path, drop stray `data` schema)"
+#  ansible.builtin.command:
+#    # NB: the role names `windmill_admin` and `windmill_user` are HARDCODED by
+#    # windmill's own migrations — they don't follow the DB name. The
+#    # Zalando-derived `<db>_owner_user` does follow the DB name, hence the
     # variable interpolation in the final GRANT.
-    cmd: >-
-      kubectl -n {{ goat_addon.db.central_db_ns }}
-      exec {{ central_db_master.resources[0].metadata.name }} -c postgres --
-      psql -U postgres -d {{ goat_addon.db.windmill_db_name }} -v ON_ERROR_STOP=1 -c
-      "DO $$ BEGIN
-         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'windmill_admin') THEN
-           CREATE ROLE windmill_admin WITH NOLOGIN BYPASSRLS;
-         ELSE
-           ALTER ROLE windmill_admin BYPASSRLS;
-         END IF;
-         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'windmill_user') THEN
-           CREATE ROLE windmill_user WITH NOLOGIN;
-         END IF;
-         -- windmill runs queries with SET ROLE windmill_admin; admin must
-         -- inherit windmill_user's table-level grants from the migrations.
-         GRANT windmill_user TO windmill_admin;
-         GRANT windmill_admin TO {{ goat_addon.db.windmill_db_name }}_owner_user;
-         GRANT windmill_user  TO {{ goat_addon.db.windmill_db_name }}_owner_user;
-       END $$;
-       ALTER ROLE {{ goat_addon.db.windmill_db_name }}_owner_user IN DATABASE {{ goat_addon.db.windmill_db_name }} SET search_path = public;
-       ALTER DATABASE {{ goat_addon.db.windmill_db_name }} SET search_path = public;
-       DROP SCHEMA IF EXISTS data CASCADE;"
+#    cmd: >-
+#      kubectl -n {{ goat_addon.db.central_db_ns }}
+ #     exec {{ central_db_master.resources[0].metadata.name }} -c postgres --
+ #     psql -U postgres -d {{ goat_addon.db.windmill_db_name }} -v ON_ERROR_STOP=1 -c
+  #    "DO $$ BEGIN
+  #       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'windmill_admin') THEN
+  #         CREATE ROLE windmill_admin WITH NOLOGIN BYPASSRLS;
+  #       ELSE
+  #         ALTER ROLE windmill_admin BYPASSRLS;
+  #       END IF;
+  #       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'windmill_user') THEN
+  #         CREATE ROLE windmill_user WITH NOLOGIN;
+  #       END IF;
+  #       -- windmill runs queries with SET ROLE windmill_admin; admin must
+  #       -- inherit windmill_user's table-level grants from the migrations.
+  #       GRANT windmill_user TO windmill_admin;
+  #       GRANT windmill_admin TO {{ goat_addon.db.windmill_db_name }}_owner_user;
+  #       GRANT windmill_user  TO {{ goat_addon.db.windmill_db_name }}_owner_user;
+  #     END $$;
+  #     ALTER ROLE {{ goat_addon.db.windmill_db_name }}_owner_user IN DATABASE {{ goat_addon.db.windmill_db_name }} SET search_path = public;
+  #     ALTER DATABASE {{ goat_addon.db.windmill_db_name }} SET search_path = public;
+ # changed_when: false
+
+- name: "Set up windmill prereqs (roles, search_path)"
+  vars:
+    # NB: the role names `windmill_admin` and `windmill_user` are HARDCODED by
+    # windmill's own migrations - they do not follow the DB name. The
+    # Zalando-derived `<db>_owner_user` does, hence the interpolation below.
+    windmill_prereq_sql: |
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'windmill_admin') THEN
+          CREATE ROLE windmill_admin WITH NOLOGIN BYPASSRLS;
+        ELSE
+          ALTER ROLE windmill_admin BYPASSRLS;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'windmill_user') THEN
+          CREATE ROLE windmill_user WITH NOLOGIN;
+        END IF;
+        /* windmill runs queries with SET ROLE windmill_admin; admin must
+           inherit the windmill_user table-level grants from the migrations. */
+        GRANT windmill_user TO windmill_admin;
+        GRANT windmill_admin TO {{ goat_addon.db.windmill_db_name }}_owner_user;
+        GRANT windmill_user  TO {{ goat_addon.db.windmill_db_name }}_owner_user;
+      END $$;
+      ALTER ROLE {{ goat_addon.db.windmill_db_name }}_owner_user
+        IN DATABASE {{ goat_addon.db.windmill_db_name }} SET search_path = public;
+      ALTER DATABASE {{ goat_addon.db.windmill_db_name }} SET search_path = public;
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
+    namespace: "{{ goat_addon.db.central_db_ns }}"
+    pod: "{{ central_db_master.resources[0].metadata.name }}"
+    container: postgres
+    command: >-
+      psql -U postgres -d {{ goat_addon.db.windmill_db_name }}
+      -v ON_ERROR_STOP=1 --single-transaction
+      -c {{ windmill_prereq_sql | quote }}
   changed_when: false

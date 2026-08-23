@@ -189,14 +189,14 @@ Addon version is independent of civitas-core's — tag the addon on its own semv
 
 ## Image references (mirror-friendly)
 
-Every container image this addon spins up — both chart-deployed services and addon-deployed ones (MinIO, mc) — is enumerated in `vars/software_references.yml` under `goat_addon_software.images.*`. Override `registry:` per image in your inventory to point at a private mirror.
+Every container image this addon spins up — both chart-deployed services and addon-deployed ones (MinIO, mc) — is enumerated in `vars/software_references.yml` under `software.addon_goat.images.*`. Override `registry:` per image in your inventory to point at a private mirror.
 
 ```sh
-yq '.goat_addon_software.images[] | "\(.registry)/\(.repository):\(.tag)"' \
+yq '.software.addon_goat.images[] | "\(.registry)/\(.repository):\(.tag)"' \
    vars/software_references.yml
 ```
 
-**Caveat.** Civitas-core's own `tools/extract-images` and `tools/harbor` playbooks currently only enumerate images under a top-level `software:` key, whereas this addon uses `goat_addon_software:`. As a result the addon's images are not picked up by that tooling today. Track this as a known integration gap.
+**Caveat.** Civitas-core's own `tools/extract-images` and `tools/harbor` playbooks currently only enumerate images under a top-level `software:` key, whereas this addon uses `software.addon_goat:`. As a result the addon's images are not picked up by that tooling today. Track this as a known integration gap.
 
 ## Known caveats
 

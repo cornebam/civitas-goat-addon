@@ -6,103 +6,109 @@
 # (e.g. Bonn). Override `registry:` per image via inventory to point at a
 # mirror without touching the chart itself.
 ---
-goat_addon_software:
+# ── GOAT release tag (applies to every image built from plan4better/goat) ─
+# Eight images ship from one monorepo and MUST agree on their release tag:
+#   - geoapi, processes and windmill_worker_tools share a DuckLake catalog
+#     via a Postgres schema; the DuckDB extension baked into each image
+#     writes the catalog's on-disk format, so a version skew between them
+#     produces "DuckLake catalog version mismatch" at attach time.
+#   - core does not use DuckDB itself (it delegates DuckLake to geoapi over
+#     HTTP, see apps/core/src/core/crud/crud_folder.py) — pinned here for
+#     release coherence and API compatibility with geoapi/processes, not
+#     for catalog compatibility.
+#   - web / windmill_server / windmill_worker_default / windmill_worker_print
+#     move together for release coherence.
+# Override per-deployment with `inv_addons.goat.release`.
+#
+# Kept at the top level (not inside `software.addon_goat`) because every
+# image tag below references it. Nesting the shared value in the same dict
+# as its consumers makes Ansible walk the subtree in a cycle when the whole
+# dict is templated (e.g. from an `assert`), raising "recursive loop
+# detected in template string".
+goat_release: "{{ inv_addons.goat.release | default('v2.4.58') }}"
 
-  # ── Helm chart we install ──────────────────────────────────────────────
-  helm_chart_name: goat
-  helm_release_name: goat
-  helm_repo_url: oci://ghcr.io/plan4better/charts
-  helm_chart_version: "0.4.0"
+software:
+  addon_goat:
+    # ── Helm chart we install ──────────────────────────────────────────────
+    helm_chart_name: goat
+    helm_release_name: goat
+    helm_repo_url: oci://ghcr.io/plan4better/charts
+    helm_chart_version: "0.4.0"
 
-  # ── GOAT release tag (applies to every image built from plan4better/goat) ─
-  # Eight images ship from one monorepo and MUST agree on their release tag:
-  #   - geoapi, processes and windmill_worker_tools share a DuckLake catalog
-  #     via a Postgres schema; the DuckDB extension baked into each image
-  #     writes the catalog's on-disk format, so a version skew between them
-  #     produces "DuckLake catalog version mismatch" at attach time.
-  #   - core does not use DuckDB itself (it delegates DuckLake to geoapi over
-  #     HTTP, see apps/core/src/core/crud/crud_folder.py) — pinned here for
-  #     release coherence and API compatibility with geoapi/processes, not
-  #     for catalog compatibility.
-  #   - web / windmill_server / windmill_worker_default / windmill_worker_print
-  #     move together for release coherence.
-  # Override per-deployment with `inv_addons.goat.release`.
-  goat_release: "{{ inv_addons.goat.release | default('v2.4.58') }}"
+    # ── Container images ────────────────────────────────────────────────────
+    # Each entry maps to a Deployment / Job that this addon (directly or via
+    # the chart) creates. Mirror-friendly: change `registry` to point at a
+    # private registry copy. Every GOAT-monorepo image defaults its `tag` to
+    # `goat_release`; override the tag individually if you truly need a skew.
+    images:
 
-  # ── Container images ────────────────────────────────────────────────────
-  # Each entry maps to a Deployment / Job that this addon (directly or via
-  # the chart) creates. Mirror-friendly: change `registry` to point at a
-  # private registry copy. Every GOAT-monorepo image defaults its `tag` to
-  # `goat_release`; override the tag individually if you truly need a skew.
-  images:
+      # Chart-deployed services. Passed through to the helm values via
+      # templates/goat_values.yml → consumed by the chart's per-service
+      # `<svc>.image.{registry,repository,tag,pullPolicy}` blocks.
+      core:
+        registry: ghcr.io
+        repository: plan4better/goat/core
+        tag: "{{ goat_release }}"
+        pullPolicy: IfNotPresent
+      web:
+        registry: ghcr.io
+        repository: plan4better/goat/web
+        tag: "{{ goat_release }}"
+        pullPolicy: IfNotPresent
+      geoapi:
+        registry: ghcr.io
+        repository: plan4better/goat/geoapi
+        tag: "{{ goat_release }}"
+        pullPolicy: IfNotPresent
+      processes:
+        registry: ghcr.io
+        repository: plan4better/goat/processes
+        tag: "{{ goat_release }}"
+        pullPolicy: IfNotPresent
+      windmill_server:
+        registry: ghcr.io
+        repository: plan4better/goat/windmill-server
+        tag: "{{ goat_release }}"
+        pullPolicy: IfNotPresent
+      windmill_worker_default:
+        registry: ghcr.io
+        repository: plan4better/goat/windmill-worker-default
+        tag: "{{ goat_release }}"
+        pullPolicy: IfNotPresent
+      # Heavier worker image (goatlib + geospatial deps) used by both `tools`
+      # and `workflows` worker pods — the chart shares one image between them.
+      # Historical note: `v2.4.37` shipped a zero-byte windmill binary that
+      # crashed with `exec format error`; this image was pinned to `v2.4.36`
+      # for many releases. That pin is long past its usefulness — do not
+      # reintroduce it reflexively. Track goat_release with everyone else.
+      windmill_worker_tools:
+        registry: ghcr.io
+        repository: plan4better/goat/windmill-worker-tools
+        tag: "{{ goat_release }}"
+        pullPolicy: IfNotPresent
+      # Chromium-based PDF/atlas generation worker.
+      windmill_worker_print:
+        registry: ghcr.io
+        repository: plan4better/goat/windmill-worker-print
+        tag: "{{ goat_release }}"
+        pullPolicy: IfNotPresent
 
-    # Chart-deployed services. Passed through to the helm values via
-    # templates/goat_values.yml → consumed by the chart's per-service
-    # `<svc>.image.{registry,repository,tag,pullPolicy}` blocks.
-    core:
-      registry: ghcr.io
-      repository: plan4better/goat/core
-      tag: "{{ goat_addon_software.goat_release }}"
-      pullPolicy: IfNotPresent
-    web:
-      registry: ghcr.io
-      repository: plan4better/goat/web
-      tag: "{{ goat_addon_software.goat_release }}"
-      pullPolicy: IfNotPresent
-    geoapi:
-      registry: ghcr.io
-      repository: plan4better/goat/geoapi
-      tag: "{{ goat_addon_software.goat_release }}"
-      pullPolicy: IfNotPresent
-    processes:
-      registry: ghcr.io
-      repository: plan4better/goat/processes
-      tag: "{{ goat_addon_software.goat_release }}"
-      pullPolicy: IfNotPresent
-    windmill_server:
-      registry: ghcr.io
-      repository: plan4better/goat/windmill-server
-      tag: "{{ goat_addon_software.goat_release }}"
-      pullPolicy: IfNotPresent
-    windmill_worker_default:
-      registry: ghcr.io
-      repository: plan4better/goat/windmill-worker-default
-      tag: "{{ goat_addon_software.goat_release }}"
-      pullPolicy: IfNotPresent
-    # Heavier worker image (goatlib + geospatial deps) used by both `tools`
-    # and `workflows` worker pods — the chart shares one image between them.
-    # Historical note: `v2.4.37` shipped a zero-byte windmill binary that
-    # crashed with `exec format error`; this image was pinned to `v2.4.36`
-    # for many releases. That pin is long past its usefulness — do not
-    # reintroduce it reflexively. Track goat_release with everyone else.
-    windmill_worker_tools:
-      registry: ghcr.io
-      repository: plan4better/goat/windmill-worker-tools
-      tag: "{{ goat_addon_software.goat_release }}"
-      pullPolicy: IfNotPresent
-    # Chromium-based PDF/atlas generation worker.
-    windmill_worker_print:
-      registry: ghcr.io
-      repository: plan4better/goat/windmill-worker-print
-      tag: "{{ goat_addon_software.goat_release }}"
-      pullPolicy: IfNotPresent
+      # Bundled redis (Bitnami sub-chart). Free Bitnami images moved to
+      # bitnamilegacy in Aug 2025 — see chart README for context.
+      redis:
+        registry: docker.io
+        repository: bitnamilegacy/redis
+        tag: "8.0.2"
+        pullPolicy: IfNotPresent
 
-    # Bundled redis (Bitnami sub-chart). Free Bitnami images moved to
-    # bitnamilegacy in Aug 2025 — see chart README for context.
-    redis:
-      registry: docker.io
-      repository: bitnamilegacy/redis
-      tag: "8.0.2"
-      pullPolicy: IfNotPresent
-
-    # Addon-deployed (not via the chart). 05_minio.yml renders these.
-    minio:
-      registry: quay.io
-      repository: minio/minio
-      tag: RELEASE.2025-09-07T16-13-09Z
-      pullPolicy: IfNotPresent
-    minio_mc:
-      registry: quay.io
-      repository: minio/mc
-      tag: RELEASE.2025-08-13T08-35-41Z
-      pullPolicy: IfNotPresent
+      # Addon-deployed (not via the chart). 05_minio.yml renders these.
+      minio:
+        registry: quay.io
+        repository: minio/minio
+        tag: RELEASE.2025-09-07T16-13-09Z
+        pullPolicy: IfNotPresent
+      minio_mc:
+        registry: quay.io
+        repository: minio/mc
+        tag: RELEASE.2025-08-13T08-35-41Z
+        pullPolicy: IfNotPresent

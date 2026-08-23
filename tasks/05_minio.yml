@@ -180,8 +180,8 @@
           spec:
             containers:
               - name: minio
-                image: "{{ goat_addon_software.images.minio.registry }}/{{ goat_addon_software.images.minio.repository }}:{{ goat_addon_software.images.minio.tag }}"
-                imagePullPolicy: "{{ goat_addon_software.images.minio.pullPolicy | default('IfNotPresent') }}"
+                image: "{{ software.addon_goat.images.minio.registry }}/{{ software.addon_goat.images.minio.repository }}:{{ software.addon_goat.images.minio.tag }}"
+                imagePullPolicy: "{{ software.addon_goat.images.minio.pullPolicy | default('IfNotPresent') }}"
                 args: ["server", "--console-address", ":9001", "/data/s3"]
                 ports:
                   - { name: api, containerPort: 9000 }
@@ -389,8 +389,8 @@
             restartPolicy: OnFailure
             containers:
               - name: mc
-                image: "{{ goat_addon_software.images.minio_mc.registry }}/{{ goat_addon_software.images.minio_mc.repository }}:{{ goat_addon_software.images.minio_mc.tag }}"
-                imagePullPolicy: "{{ goat_addon_software.images.minio_mc.pullPolicy | default('IfNotPresent') }}"
+                image: "{{ software.addon_goat.images.minio_mc.registry }}/{{ software.addon_goat.images.minio_mc.repository }}:{{ software.addon_goat.images.minio_mc.tag }}"
+                imagePullPolicy: "{{ software.addon_goat.images.minio_mc.pullPolicy | default('IfNotPresent') }}"
                 env:
                   # Endpoint for `mc alias set`. Internal mode → in-cluster
                   # MinIO Service; external mode → operator-supplied endpoint.
@@ -571,8 +571,8 @@
                 # arrangement) decoupled catalog format from runtime version
                 # and produced hard `DuckLake catalog version mismatch`
                 # failures at first attach.
-                image: "{{ goat_addon_software.images.processes.registry }}/{{ goat_addon_software.images.processes.repository }}:{{ goat_addon_software.images.processes.tag }}"
-                imagePullPolicy: "{{ goat_addon_software.images.processes.pullPolicy | default('IfNotPresent') }}"
+                image: "{{ software.addon_goat.images.processes.registry }}/{{ software.addon_goat.images.processes.repository }}:{{ software.addon_goat.images.processes.tag }}"
+                imagePullPolicy: "{{ software.addon_goat.images.processes.pullPolicy | default('IfNotPresent') }}"
                 env:
                   - name: PG_HOST
                     value: "{{ goat_addon.db.central_db_name }}.{{ goat_addon.db.central_db_ns }}.svc.cluster.local"

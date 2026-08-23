@@ -22,15 +22,16 @@
 # Paths use the civitas `addon_dir` convention instead of hardcoding
 # `playbook_dir + '/addons/goat_addon/'`, so the addon works wherever it is
 # checked out. `default('')` falls back to include-relative resolution.
+- name: DEBUG resolve goat_release before include_vars                                                                                                     
+  ansible.builtin.debug:
+    msg:
+      - "inv_addons.goat.release RAW: {{ inv_addons.goat.release | default('<undef>') }}"
+      - "software.addon_goat RAW: {{ goat_addon_software | default('<undef>') }}"
+  tags: ["addons"]   
 
-- name: "GOAT addon: load software references"
-  ansible.builtin.include_vars:
-    file: "{{ addon_dir | default('') }}vars/software_references.yml"
-  tags: ["addons"]
-
-- name: "GOAT addon: load defaults"
-  ansible.builtin.include_vars:
-    file: "{{ addon_dir | default('') }}vars/default.yml"
+- name: Include GOAT vars
+  include_vars:
+    dir: vars
   tags: ["addons"]
 
 # geoapi and processes need controller-specific ingress annotations
@@ -40,14 +41,7 @@
 # logged anywhere. Fail clearly here rather than silently mis-route.
 - name: "GOAT addon: assert ingress class is supported by the profile map"
   ansible.builtin.assert:
-    that:
-      - inv_k8s.ingress_class in goat_addon.ingress.profiles
-    fail_msg: >-
-      inv_k8s.ingress_class = `{{ inv_k8s.ingress_class }}` but the goat
-      addon has no ingress routing profile for it. Supported controllers:
-      {{ goat_addon.ingress.profiles.keys() | list | join(', ') }}. Add a
-      profile under `goat_addon.ingress.profiles.<class>` in
-      vars/default.yml — see the block there for the schema.
+    that: inv_k8s.ingress_class in goat_addon.ingress.profiles
   tags: ["addons"]
 
 - name: "GOAT addon: create namespace and mirror the civitas CA"
