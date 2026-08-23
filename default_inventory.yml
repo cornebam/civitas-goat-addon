@@ -34,11 +34,11 @@ inv_addons:
     # Object storage. Default is a single-replica in-cluster MinIO deployed
     # by this addon. To point at pre-existing S3-compatible storage
     # (external MinIO, Cloudflare R2, Wasabi, Backblaze B2, or AWS S3),
-    # set `mode: external` and fill in the endpoint fields.
-    # Preconditions for external: `minio-credentials` Secret exists in the
-    # goat namespace with keys `access_key` and `secret_key`; the bucket
-    # exists (or is creatable with those creds); SigV4 region matches;
-    # path-style S3 is supported unless `force_path_style: false`.
+    # set `mode: external` and fill in the endpoint + credential fields.
+    # Preconditions for external: `access_key` + `secret_key` supplied
+    # (keep them in ansible-vault); the bucket exists (or is creatable
+    # with those creds); SigV4 region matches; path-style S3 is supported
+    # unless `force_path_style: false`.
     # See README §External S3.
     # s3:
     #   bucket: "goat"
@@ -46,6 +46,9 @@ inv_addons:
     #   endpoint: "http://minio.shared-minio.svc.cluster.local:9000"
     #   public_endpoint: "https://s3.{{ DOMAIN }}"
     #   region: "us-east-1"
+    #   # Credentials — keep in ansible-vault under the `secrets` tree.
+    #   access_key: "{{ secrets.inv_addons.goat.s3_access_key }}"
+    #   secret_key: "{{ secrets.inv_addons.goat.s3_secret_key }}"
     #   # For real AWS S3:
     #   # provider: "aws"
     #   # force_path_style: false

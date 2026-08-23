@@ -106,6 +106,11 @@ inv_addons:
       # External-mode fields — required when mode: external.
       endpoint: ""            # http(s)://... cluster-visible (in-pod code)
       public_endpoint: ""     # https://... browser-visible (presigned URLs)
+      # External-mode credentials — required when mode: external.
+      # Keep in ansible-vault; the addon writes them into a
+      # `goat-s3-credentials` Secret in the goat namespace.
+      access_key: ""
+      secret_key: ""
       # Runtime S3 settings — used in both modes.
       region: "us-east-1"
       provider: "minio"       # or "aws" — passed through as S3_PROVIDER
@@ -127,16 +132,15 @@ inv_addons:
       region: "eu-central-1"
       provider: "aws"
       force_path_style: false
+      # Keep the two values in ansible-vault under the `secrets` tree.
+      access_key: "{{ secrets.inv_addons.goat.s3_access_key }}"
+      secret_key: "{{ secrets.inv_addons.goat.s3_secret_key }}"
 ```
 
 Preconditions (all asserted at addon start when `mode: external`):
 
-1. **`minio-credentials` Secret pre-exists** in the goat namespace with keys `access_key` and `secret_key`. The addon does not fetch or mirror credentials from anywhere else — the operator creates it:
-   ```sh
-   kubectl -n <env>-goat-stack create secret generic minio-credentials \
-     --from-literal=access_key=<...> --from-literal=secret_key=<...>
-   ```
-2. **Bucket** identified by `s3.bucket` either already exists or is creatable by those credentials (the bucket-init Job still runs and `mc mb --ignore-existing`).
+1. **`access_key` + `secret_key` supplied** via inventory (source them from ansible-vault under `secrets.inv_addons.goat.s3_access_key` / `s3_secret_key`). The addon materializes them into a `goat-s3-credentials` Secret in the goat namespace on every run — no manual `kubectl create secret` step and no cross-namespace secret references. If your credentials live in a Secret elsewhere, copy the values into the vault once; the addon owns the in-namespace Secret from then on.
+2. **Bucket** identified by `s3.bucket` **already exists** at the endpoint. The addon skips its `goat-bucket-init` Job in external mode — external credentials are typically scoped to a specific bucket without `s3:CreateBucket`, and the bucket is provisioned by the operator (Terraform, cloud console, `mc mb`, etc.) before the playbook runs. The credentials must have `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, and `s3:ListBucket` on this bucket — DuckLake-init writes catalog metadata to it on every run.
 3. **`endpoint`** is reachable from the goat namespace (in-cluster DNS or public network). Used by boto3 / DuckDB / `mc` inside pods.
 4. **`public_endpoint`** is reachable from the browser. Substituted into presigned URLs returned by goat-core. Must serve the bucket at `/<bucket>` when `force_path_style: true`, or as `<bucket>.<host>` when `force_path_style: false` — SigV4 signs the canonical URI, so any URI rewrite en route breaks signatures.
 5. **`region`** matches how SigV4 is signed on the target. AWS S3 requires the bucket's actual region; MinIO / R2 / etc. usually accept any value but should match what the endpoint advertises.
@@ -210,6 +214,25 @@ yq '.software.addon_goat.images[] | "\(.registry)/\(.repository):\(.tag)"' \
 - **`goat-core` has no curl**: the image is stripped to essentials. Don't write tasks that `kubernetes.core.k8s_exec` shell-out into the container; rely on Kubernetes probes instead.
 
 - **Ansible Jinja2 in dict keys**: if you ever need to add a third `preparedDatabases` entry with a name derived from a variable, note that Ansible does NOT evaluate Jinja inside YAML dict keys. Workaround in `01_db.yml`: a `set_fact` + a single Jinja dict-literal expression.
+
+- **Upgrading from a version that used `minio-credentials` / `minio-bucket-init`**: the previous names were MinIO-branded, misleading once external non-MinIO backends were supported. Renames:
+  - Secret `minio-credentials` → `goat-s3-credentials`
+  - Job `minio-bucket-init` → `goat-bucket-init` (in-cluster mode only — the bucket-init Job no longer runs in external mode, since external credentials typically lack `s3:CreateBucket` and the bucket is provisioned out-of-band by the operator)
+
+  Upgrade steps:
+  - **External S3 mode**: no data risk. Delete the leftover resources to keep the namespace tidy:
+    ```sh
+    kubectl -n <env>-goat-stack delete secret minio-credentials --ignore-not-found
+    kubectl -n <env>-goat-stack delete job minio-bucket-init --ignore-not-found
+    ```
+  - **In-cluster MinIO mode**: the addon will *not* find the old credentials Secret under the new name and will generate fresh root credentials, which MinIO's on-disk data rejects at startup — bucket-init and DuckLake-init then fail. Before upgrading, copy the old Secret to the new name so the addon reuses the existing creds:
+    ```sh
+    kubectl -n <env>-goat-stack get secret minio-credentials -o yaml \
+      | sed 's/name: minio-credentials/name: goat-s3-credentials/' \
+      | kubectl apply -f -
+    kubectl -n <env>-goat-stack delete secret minio-credentials
+    kubectl -n <env>-goat-stack delete job minio-bucket-init --ignore-not-found
+    ```
 
 ## License
 

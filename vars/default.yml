@@ -51,8 +51,9 @@ goat_addon:
     #     real AWS S3 — see `provider` / `force_path_style` for AWS.
     #
     # Preconditions when mode == 'external':
-    #   * A `minio-credentials` Secret already exists in goat_addon.namespace
-    #     with keys `access_key` and `secret_key` (no cross-ns mirroring).
+    #   * `access_key` + `secret_key` non-empty (below). The addon
+    #     materializes them into a `goat-s3-credentials` Secret in
+    #     goat_addon.namespace — keep the source values in ansible-vault.
     #   * `endpoint` + `public_endpoint` set below.
     #   * The endpoint is reachable from the goat namespace.
     #   * SigV4 `region` matches how the target signs.
@@ -62,6 +63,12 @@ goat_addon:
     # External-mode endpoints. Ignored when mode == 'in_cluster'.
     endpoint: "{{ inv_addons.goat.s3.endpoint | default('') }}"
     public_endpoint: "{{ inv_addons.goat.s3.public_endpoint | default('') }}"
+    # External-mode credentials. Required (non-empty) when mode == 'external';
+    # ignored when mode == 'in_cluster' (the addon generates its own creds).
+    # Keep the source values in ansible-vault; the addon writes them into the
+    # `goat-s3-credentials` Secret in goat_addon.namespace on every run.
+    access_key: "{{ inv_addons.goat.s3.access_key | default('') }}"
+    secret_key: "{{ inv_addons.goat.s3.secret_key | default('') }}"
     # Runtime S3 settings — applied in both modes.
     region: "{{ inv_addons.goat.s3.region | default('us-east-1') }}"
     # `S3_PROVIDER` passed to goat-core / geoapi / processes / windmill

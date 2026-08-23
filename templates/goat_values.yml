@@ -158,10 +158,10 @@ core:
   extraEnv:
     - name: S3_ACCESS_KEY_ID
       valueFrom:
-        secretKeyRef: { name: minio-credentials, key: access_key }
+        secretKeyRef: { name: goat-s3-credentials, key: access_key }
     - name: S3_SECRET_ACCESS_KEY
       valueFrom:
-        secretKeyRef: { name: minio-credentials, key: secret_key }
+        secretKeyRef: { name: goat-s3-credentials, key: secret_key }
 
 geoapi:
   enabled: true
@@ -202,10 +202,10 @@ geoapi:
       value: /etc/ssl/civitas/ca.crt
     - name: S3_ACCESS_KEY_ID
       valueFrom:
-        secretKeyRef: { name: minio-credentials, key: access_key }
+        secretKeyRef: { name: goat-s3-credentials, key: access_key }
     - name: S3_SECRET_ACCESS_KEY
       valueFrom:
-        secretKeyRef: { name: minio-credentials, key: secret_key }
+        secretKeyRef: { name: goat-s3-credentials, key: secret_key }
   extraVolumes:
     - name: civitas-ca
       configMap:
@@ -287,16 +287,16 @@ processes:
       value: /etc/ssl/civitas/ca.crt
     - name: S3_ACCESS_KEY_ID
       valueFrom:
-        secretKeyRef: { name: minio-credentials, key: access_key }
+        secretKeyRef: { name: goat-s3-credentials, key: access_key }
     - name: S3_SECRET_ACCESS_KEY
       valueFrom:
-        secretKeyRef: { name: minio-credentials, key: secret_key }
+        secretKeyRef: { name: goat-s3-credentials, key: secret_key }
     - name: DUCKLAKE_S3_ACCESS_KEY
       valueFrom:
-        secretKeyRef: { name: minio-credentials, key: access_key }
+        secretKeyRef: { name: goat-s3-credentials, key: access_key }
     - name: DUCKLAKE_S3_SECRET_KEY
       valueFrom:
-        secretKeyRef: { name: minio-credentials, key: secret_key }
+        secretKeyRef: { name: goat-s3-credentials, key: secret_key }
   extraVolumes:
     - name: civitas-ca
       configMap:
@@ -533,10 +533,10 @@ windmill:
             secretKeyRef: { name: goat-postgres-creds, key: password }
         - name: S3_ACCESS_KEY_ID
           valueFrom:
-            secretKeyRef: { name: minio-credentials, key: access_key }
+            secretKeyRef: { name: goat-s3-credentials, key: access_key }
         - name: S3_SECRET_ACCESS_KEY
           valueFrom:
-            secretKeyRef: { name: minio-credentials, key: secret_key }
+            secretKeyRef: { name: goat-s3-credentials, key: secret_key }
     workflows:
       enabled: true
       image:
@@ -574,10 +574,10 @@ windmill:
             secretKeyRef: { name: goat-postgres-creds, key: password }
         - name: S3_ACCESS_KEY_ID
           valueFrom:
-            secretKeyRef: { name: minio-credentials, key: access_key }
+            secretKeyRef: { name: goat-s3-credentials, key: access_key }
         - name: S3_SECRET_ACCESS_KEY
           valueFrom:
-            secretKeyRef: { name: minio-credentials, key: secret_key }
+            secretKeyRef: { name: goat-s3-credentials, key: secret_key }
     print:
       enabled: true
       image:
