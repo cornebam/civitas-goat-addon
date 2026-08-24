@@ -9,9 +9,16 @@ inv_addons:
     # variants). See vars/software_references.yml for the rationale — they
     # must move together to keep the DuckLake catalog format consistent.
     release: "v2.4.58"
-    chart:
-      ref: "oci://ghcr.io/plan4better/charts/goat"
-      version: "0.4.0"
+    # Chart source. By default the addon installs from the pre-fetched tarball
+    # shipped in `addons/goat_addon/files/goat-<version>.tgz` — nothing to set
+    # here unless you want to pin a non-default version or pull remotely.
+    #
+    # Bump the bundled chart: drop a new `.tgz` into `files/` and set
+    # `chart.version` here (the default resolver builds the filename from it).
+    # Pull remotely instead: uncomment `chart.ref` and point it at the OCI URL.
+    # chart:
+    #   ref: "oci://ghcr.io/plan4better/charts/goat"
+    #   version: "0.4.0"
     db:
       # Postgres database names. Defaults match upstream conventions.
       # Override only if you need to co-tenant multiple goat installs in

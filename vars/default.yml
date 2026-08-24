@@ -10,11 +10,17 @@ goat_addon:
   # inv_gd / inv_datacatalog do.
   ns_create: "{{ inv_addons.goat.ns_create | default(true) }}"
   ns_kubeconfig: "{{ inv_addons.goat.ns_kubeconfig | default(kubeconfig_file) }}"
-  # Chart + image refs are the canonical source for which artifacts this
-  # addon pulls. Set in vars/software_references.yml; surfaced here so
-  # inventory can still override per-deployment without forking the file.
+  # Chart + image refs. Default `ref` points at the pre-fetched chart tarball
+  # shipped with this addon at `files/goat-<version>.tgz` — makes the addon
+  # offline-installable out of the box (Bonn/air-gapped) and avoids the
+  # ghcr.io private-package auth path entirely. The filename is built from
+  # `chart.version` below, so bumping the bundled chart is: drop a new
+  # `.tgz` into `files/`, bump the version pin in vars/software_references.yml
+  # (or override `inv_addons.goat.chart.version` from inventory).
+  # To pull remotely instead, set `inv_addons.goat.chart.ref` in inventory
+  # to an `oci://…` URL (e.g. `oci://ghcr.io/plan4better/charts/goat`).
   chart:
-    ref: "{{ inv_addons.goat.chart.ref | default(software.addon_goat.helm_repo_url + '/' + software.addon_goat.helm_chart_name) }}"
+    ref: "{{ inv_addons.goat.chart.ref | default(addon_dir + 'files/goat-' + (inv_addons.goat.chart.version | default(software.addon_goat.helm_chart_version)) + '.tgz') }}"
     version: "{{ inv_addons.goat.chart.version | default(software.addon_goat.helm_chart_version) }}"
   db:
     central_db_ns: "{{ inv_central_db.ns_name }}"

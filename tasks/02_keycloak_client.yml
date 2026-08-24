@@ -7,40 +7,97 @@
 # goat namespace with keys: server-url, realm, client-id, client-secret,
 # nextauth-secret. The chart's auth.existingSecret consumes it.
 
+# Log in to the civitas platform Keycloak as the platform admin.
+# civitas 1.5 does not ship the tasks/templates/keycloak_login.yaml helper
+# that later releases provide, so we inline the same flow the airflow addon uses.
+- name: "GOAT addon: get platform admin credentials"
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
+    kind: Secret
+    namespace: "{{ inv_access.ns_name }}"
+    name: "{{ inv_access.platform.k8s_secret_name }}"
+  register: admin_credentials
+
+- name: "GOAT addon: store platform admin credentials"
+  ansible.builtin.set_fact:
+    ADMIN_USERNAME: "{{ admin_credentials.resources[0].data.MASTER_USERNAME | b64decode }}"
+    ADMIN_PASSWORD: "{{ admin_credentials.resources[0].data.MASTER_PASSWORD | b64decode }}"
+    cacheable: yes
+
 - name: "GOAT addon: login to civitas Keycloak as platform admin"
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/templates/keycloak_login.yaml"
-
-- name: "GOAT addon: check if goat-web client already exists"
-  uri:
-    method: GET
-    url: "{{ inv_access.platform.hostname }}/admin/realms/{{ inv_access.tenant.realm_name }}/clients?clientId={{ goat_addon.keycloak.client_id }}"
-    ca_path: "{{ inv_k8s.ingress.ca_path | default(omit) }}"
-    return_content: yes
-    headers:
-      Accept: application/json
-      Authorization: "Bearer {{ keycloak_login.json.access_token }}"
-    status_code: 200
-  register: existing_client
   check_mode: no
+  uri:
+    method: POST
+    url: "{{ inv_access.platform.hostname }}/realms/master/protocol/openid-connect/token"
+    return_content: yes
+    body_format: form-urlencoded
+    ca_path: "{{ inv_k8s.ingress.ca_path }}"
+    body:
+      grant_type: "password"
+      client_id: "admin-cli"
+      username: "{{ ADMIN_USERNAME }}"
+      password: "{{ ADMIN_PASSWORD }}"
+    status_code: 200
+  register: keycloak_login
 
-- name: "GOAT addon: create goat-web client when absent"
+- name: "GOAT addon: create goat-web client"
   uri:
     method: POST
     url: "{{ inv_access.platform.hostname }}/admin/realms/{{ inv_access.tenant.realm_name }}/clients"
-    ca_path: "{{ inv_k8s.ingress.ca_path | default(omit) }}"
+    return_content: yes
     body_format: json
+    ca_path: "{{ inv_k8s.ingress.ca_path }}"
     body: "{{ lookup('template', playbook_dir + '/addons/goat_addon/templates/goat-keycloak-client.json.j2') }}"
     headers:
       Accept: application/json
       Authorization: "Bearer {{ keycloak_login.json.access_token }}"
-    status_code: 201
-  when: existing_client.json | length == 0
+    status_code: 201,409
+  register: client_goat_response
+
+- name: "GOAT addon: note if goat-web client already exists"
+  debug:
+    msg: "goat-web client already exists in realm {{ inv_access.tenant.realm_name }}."
+  when:
+    - not ansible_check_mode
+    - client_goat_response.status == 409
+  
+- name: Get clients
+  check_mode: no
+  uri:
+    method: GET
+    url: "{{ inv_access.platform.hostname }}/admin/realms/{{ inv_access.tenant.realm_name }}/clients"
+    return_content: yes
+    ca_path: "{{ inv_k8s.ingress.ca_path }}"
+    headers:
+      Accept: application/json
+      Authorization: Bearer {{ keycloak_login.json.access_token }}
+    status_code: 200
+  register: clients
+
+- name: "Get keycloak client Goat ID."
+  set_fact:
+    client_id_goat: "{{ clients.json | json_query(query) }}"
+  vars:
+    query: "[?clientId== '{{ goat_addon.keycloak.client_id }}'].id | [0]"
 
 - name: "GOAT addon: fetch goat-web client secret"
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/templates/keycloak_client_secret.yaml"
-  vars:
-    module: "GOAT addon"
-    client_id: "{{ goat_addon.keycloak.client_id }}"
+  check_mode: no
+  uri:
+    method: GET
+    url: "{{ inv_access.platform.hostname }}/admin/realms/{{ inv_access.tenant.realm_name }}/clients/{{ client_id_goat }}/client-secret"
+    return_content: yes
+    ca_path: "{{ inv_k8s.ingress.ca_path }}"
+    headers:
+      Accept: application/json
+      Authorization: Bearer {{ keycloak_login.json.access_token }}
+    status_code: 200
+  register: keycloak_client_secret_response
+
+- name: "{{ module }}: Extract Keycloak client secret"
+  set_fact:
+    client_secret: "{{ keycloak_client_secret_response.json.value }}"
+
 
 # At this point, `client_secret` is set by the included civitas template.
 

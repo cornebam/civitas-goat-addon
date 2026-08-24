@@ -176,12 +176,13 @@ geoapi:
     AUTH: "true"
     KEYCLOAK_SERVER_URL: "{{ inv_access.platform.hostname }}"
     REALM_NAME: "{{ inv_access.tenant.realm_name }}"
-    # Postgres connection for the DuckLake catalog schema. POSTGRES_USER /
-    # POSTGRES_PASSWORD are auto-wired by the chart from the same secret as
-    # goat-core (goat-postgres-creds → goat user). Same DB, separate schema.
-    POSTGRES_SERVER: "{{ goat_addon.db.central_db_name }}.{{ goat_addon.db.central_db_ns }}.svc.cluster.local"
-    POSTGRES_PORT: "5432"
-    POSTGRES_DB: "{{ goat_addon.db.goat_db_name }}"
+    # Postgres connection for the DuckLake catalog schema. Chart 0.4.0's
+    # geoapi ConfigMap unconditionally emits POSTGRES_SERVER/DB/PORT from
+    # `postgresql.external.*` after ranging over this `config:` block, so
+    # setting them here again produces duplicate mapping keys at render
+    # time. Rely on the chart-emitted values (same DB, separate schema);
+    # POSTGRES_USER / POSTGRES_PASSWORD are likewise auto-wired by the
+    # chart from goat-postgres-creds.
     DUCKLAKE_CATALOG_SCHEMA: "ducklake"
     # DATA_PATH for the DuckLake ATTACH. Must match what 05_minio.yml passed
     # to the ducklake-init Job. Upstream compose keeps this as a LOCAL path
@@ -256,9 +257,9 @@ processes:
     AUTH: "true"
     KEYCLOAK_SERVER_URL: "{{ inv_access.platform.hostname }}"
     REALM_NAME: "{{ inv_access.tenant.realm_name }}"
-    POSTGRES_SERVER: "{{ goat_addon.db.central_db_name }}.{{ goat_addon.db.central_db_ns }}.svc.cluster.local"
-    POSTGRES_PORT: "5432"
-    POSTGRES_DB: "{{ goat_addon.db.goat_db_name }}"
+    # See geoapi.config note above — chart 0.4.0's processes ConfigMap
+    # emits POSTGRES_SERVER/DB/PORT itself from `postgresql.external.*`,
+    # so leave them out here to avoid duplicate mapping keys at render time.
     DUCKLAKE_CATALOG_SCHEMA: "ducklake"
     DUCKLAKE_DATA_DIR: "/app/data/ducklake"
     # processes' config.py declares BOTH S3_* (boto3-style) AND DUCKLAKE_S3_*
@@ -498,8 +499,13 @@ windmill:
         tag: "{{ software.addon_goat.images.windmill_worker_tools.tag }}"
         pullPolicy: "{{ software.addon_goat.images.windmill_worker_tools.pullPolicy | default('IfNotPresent') }}"
       # Override chart default `node.kubernetes.io/server-usage: geodata`
-      # which civitas's local clusters don't carry.
-      nodeSelector: {}
+      # which civitas's local clusters don't carry. NOTE: `{}` does NOT clear
+      # the chart default — helm's `coalesceTablesFullKey` recurses into map
+      # values and merges chart keys into empty user maps, so `{}` over
+      # `{server-usage: geodata}` yields `{server-usage: geodata}` again.
+      # Explicit `null` is the only override helm treats as "drop this key",
+      # then the chart's guard skips.
+      nodeSelector: null
       tolerations: []
       # Mount the shared DuckLake PVC so writes here are visible to geoapi
       # (and workflows). Provisioned by 05_minio.yml as `goat-ducklake-data`
@@ -544,7 +550,9 @@ windmill:
         repository: "{{ software.addon_goat.images.windmill_worker_tools.repository }}"
         tag: "{{ software.addon_goat.images.windmill_worker_tools.tag }}"
         pullPolicy: "{{ software.addon_goat.images.windmill_worker_tools.pullPolicy | default('IfNotPresent') }}"
-      nodeSelector: {}
+      # See tools.nodeSelector note above — `null` is required to actually
+      # override chart default; `{}` would silently re-merge.
+      nodeSelector: null
       tolerations: []
       persistence:
         enabled: true

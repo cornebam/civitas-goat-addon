@@ -9,16 +9,57 @@
 #      `inv_addons.goat.helm_values` is recursively merged over the rendered
 #      values — no need to fork templates/goat_values.yml to tweak one key.
 #
-# The chart is OCI-hosted, so `helm_repo_name` is intentionally left unset:
-# the wrapper skips `helm_repository` and installs straight from
-# `helm_chart_reference` (an oci:// URL) at the pinned `helm_chart_version`.
+# `helm_repo_name` is intentionally left unset. Combined with
+# `helm_chart_version` being unset (see below), the wrapper routes into its
+# "local chart" branch, which installs straight from `helm_chart_reference`
+# — a filesystem path to `files/goat-<version>.tgz` shipped with this addon
+# (default) or, if overridden in inventory, an `oci://…` URL.
+#
+# `helm_chart_version` is deliberately NOT passed. The wrapper's pinned-version
+# branch invokes `helm --version=<X> show chart <ref>`; that `--version` flag
+# is a repo-lookup constraint and helm rejects it for local chart files (and
+# it just re-adds a version constraint on top of a pinned tarball, which is
+# redundant since the version is already encoded in the tgz filename).
+# Version pinning still happens via the filename → `chart.version` chain.
+
+# Bitnami's redis subchart (bundled by the goat chart) auto-generates a
+# random password on first install and stores it in the `goat-redis` Secret.
+# On every subsequent `helm upgrade`, its pre-render guardrail refuses to
+# render unless `global.redis.password` is supplied — the intent is to stop
+# operators from silently rotating the password and locking existing clients
+# out. Read the value back from the Secret and thread it through
+# helm_values_rcombine. On the very first install the Secret doesn't exist
+# yet, `existing_redis_secret.resources` is empty, and we pass nothing —
+# Bitnami then generates the password itself. Every rerun after that
+# supplies the stored value and the guardrail is satisfied. No changes to
+# the shared k8s-helm wrapper needed: helm_values_rcombine is its existing
+# extension point, and we just hand it a slightly larger dict.
+- name: "GOAT addon: fetch existing redis password (populated after first install)"
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
+    api_version: v1
+    kind: Secret
+    namespace: "{{ goat_addon.namespace }}"
+    name: goat-redis
+  register: existing_redis_secret
+
+- name: "GOAT addon: thread existing redis password into helm values on upgrade"
+  ansible.builtin.set_fact:
+    redis_password_override:
+      global:
+        redis:
+          password: "{{ existing_redis_secret.resources[0].data['redis-password'] | b64decode }}"
+  when:
+    - existing_redis_secret.resources | length > 0
+    - existing_redis_secret.resources[0].data['redis-password'] is defined
+
 - name: "[Helm] Create the GOAT installation"
   ansible.builtin.include_tasks: tasks/templates/k8s-helm.yml
   vars:
     helm_chart_name: "{{ software.addon_goat.helm_chart_name }}"
     helm_release_name: "{{ software.addon_goat.helm_release_name }}"
     helm_chart_reference: "{{ goat_addon.chart.ref }}"
-    helm_chart_version: "{{ goat_addon.chart.version }}"
     helm_values_file: "{{ addon_dir | default('') }}templates/goat_values.yml"
-    helm_values_rcombine: "{{ inv_addons.goat.helm_values | default({}) }}"
+    helm_values_rcombine: "{{ (inv_addons.goat.helm_values | default({})) | combine(redis_password_override | default({}), recursive=True) }}"
     helm_create_namespace: false

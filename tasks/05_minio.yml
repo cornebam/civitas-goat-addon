@@ -54,7 +54,7 @@
           # cannot provision RWX — set pvc_access_mode: ReadWriteOnce there
           # (sharing then relies on co-scheduling, see README).
           - "{{ goat_addon.ducklake.pvc_access_mode | default('ReadWriteMany') }}"
-        storageClassName: "{{ inv_k8s.storage_class.rwx }}"
+        storageClassName: "cephhstg-cephfs" # {{ inv_k8s.storage_class.rwx }}"
         resources:
           requests:
             storage: "{{ goat_addon.ducklake.pvc_size | default('20Gi') }}"
@@ -480,19 +480,24 @@
           image so LOAD alone hits the extensions baked into
           DUCKDB_EXTENSION_DIRECTORY, and the catalog's on-disk format
           matches every runtime attach."""
+
           import os
           import duckdb
+          from goatlib.storage.ducklake import (
+              REQUIRED_DUCKDB_EXTENSIONS,
+              configure_baked_extensions,
+          )
 
           con = duckdb.connect()
-          for ext in ("spatial", "httpfs", "postgres", "ducklake"):
-              try:
-                  con.execute(f"LOAD {ext};")
-              except duckdb.Error:
-                  # Fallback if the extension directory was overridden.
-                  # This goes to the internet; the Job's activeDeadlineSeconds
-                  # is the hard cap if the mirror is unreachable.
-                  con.execute(f"INSTALL {ext};")
-                  con.execute(f"LOAD {ext};")
+          if not configure_baked_extensions(con):
+              raise RuntimeError(
+                  "DUCKDB_EXTENSION_DIRECTORY unset — refusing to fall back to "
+                  "extensions.duckdb.org from a cluster Job."
+              )
+          print("extension_directory:",
+                con.execute("select current_setting('extension_directory')").fetchone()[0])
+          for ext in REQUIRED_DUCKDB_EXTENSIONS:
+              con.execute(f"LOAD {ext};")
 
           con.execute("SET s3_endpoint = ?;", [os.environ["S3_ENDPOINT"]])
           con.execute("SET s3_access_key_id = ?;", [os.environ["S3_KEY"]])
