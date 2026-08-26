@@ -12,7 +12,7 @@ goat_addon:
   ns_kubeconfig: "{{ inv_addons.goat.ns_kubeconfig | default(kubeconfig_file) }}"
   # Chart + image refs. Default `ref` points at the pre-fetched chart tarball
   # shipped with this addon at `files/goat-<version>.tgz` — makes the addon
-  # offline-installable out of the box (Bonn/air-gapped) and avoids the
+  # offline-installable out of the box (air-gapped deployments) and avoids the
   # ghcr.io private-package auth path entirely. The filename is built from
   # `chart.version` below, so bumping the bundled chart is: drop a new
   # `.tgz` into `files/`, bump the version pin in vars/software_references.yml
@@ -36,10 +36,29 @@ goat_addon:
     # Client ID created in the civitas Keycloak realm. Defaults to `goat-web`,
     # matching the convention used by plan4better's standalone infra.
     client_id: "{{ inv_addons.goat.keycloak.client_id | default('goat-web') }}"
+  # Master switches for the two exposure mechanisms. `enable_ingress: true`
+  # is the historical default (Ingress on all four chart services + MinIO).
+  # `enable_gateway: true` deploys a Gateway + HTTPRoute instead of / in
+  # addition to the Ingress path — used on clusters that run a Gateway-API
+  # controller (NGINX Gateway Fabric, Traefik >= v3). Both can be `true`
+  # temporarily during a migration; production should pick one.
+  enable_ingress: "{{ inv_addons.goat.enable_ingress | default(true) | bool }}"
+  enable_gateway: "{{ inv_addons.goat.enable_gateway | default(false) | bool }}"
   web:
-    # Public URL of the GOAT web frontend. Used for Keycloak redirect URIs
-    # and NEXTAUTH_URL. Defaults to https://goat.<DOMAIN>.
-    public_url: "{{ inv_addons.goat.web.public_url | default('https://goat.' + DOMAIN) }}"
+    # Subdomain used to compose BOTH the ingress hostname and the public
+    # (browser-facing) URL. Reverse-proxy topology: when there is no proxy,
+    # DOMAIN == INGRESS_DOMAIN and the two hostnames coincide; behind a
+    # proxy, DOMAIN is the browser-facing zone while
+    # INGRESS_DOMAIN is the internal ingress-visible one. The default falls
+    # `INGRESS_DOMAIN` back to `DOMAIN` so single-hostname setups keep
+    # working without touching the inventory.
+    subdomain: "{{ inv_addons.goat.web.subdomain | default('goat') }}"
+    # Public URL of the GOAT web frontend. Speeds `NEXT_PUBLIC_*` /
+    # `NEXTAUTH_URL` / Keycloak `redirectUris` / `S3_PUBLIC_ENDPOINT_URL` —
+    # the URL the browser sees, NOT the ingress host. Default composes it
+    # from `subdomain` + `DOMAIN`; override in inventory if you need a
+    # different public URL than `<subdomain>.<DOMAIN>`.
+    public_url: "{{ inv_addons.goat.web.public_url | default('https://' + (inv_addons.goat.web.subdomain | default('goat')) + '.' + DOMAIN) }}"
   s3:
     # Bucket name. DuckLake parquet files + uploaded assets land here. Same
     # key regardless of whether the object store is the in-cluster MinIO
@@ -60,15 +79,19 @@ goat_addon:
     #   * `access_key` + `secret_key` non-empty (below). The addon
     #     materializes them into a `goat-s3-credentials` Secret in
     #     goat_addon.namespace — keep the source values in ansible-vault.
-    #   * `endpoint` + `public_endpoint` set below.
+    #   * `endpoint` set below.
     #   * The endpoint is reachable from the goat namespace.
     #   * SigV4 `region` matches how the target signs.
     #   * If `force_path_style: true` (default), the endpoint must support
     #     path-style S3.
     mode: "{{ inv_addons.goat.s3.mode | default('in_cluster') }}"
-    # External-mode endpoints. Ignored when mode == 'in_cluster'.
+    # External-mode endpoint. Ignored when mode == 'in_cluster'. Only
+    # the cluster-internal endpoint is configured — the browser-facing
+    # S3 URL is ALWAYS `goat_public_url` in both modes (the addon runs
+    # a `/<bucket>` Ingress that proxies to an ExternalName service
+    # pointing at this endpoint), so there is no `public_endpoint`
+    # variable to keep in sync.
     endpoint: "{{ inv_addons.goat.s3.endpoint | default('') }}"
-    public_endpoint: "{{ inv_addons.goat.s3.public_endpoint | default('') }}"
     # External-mode credentials. Required (non-empty) when mode == 'external';
     # ignored when mode == 'in_cluster' (the addon generates its own creds).
     # Keep the source values in ansible-vault; the addon writes them into the
@@ -93,6 +116,16 @@ goat_addon:
     # provision RWX — set ReadWriteOnce there (sharing then relies on
     # co-scheduling, see README).
     pvc_access_mode: "{{ inv_addons.goat.ducklake.pvc_access_mode | default('ReadWriteMany') }}"
+    # Storage class for the shared DuckLake PVC. Defaults to
+    # `inv_k8s.storage_class.rwx` (the cluster-wide RWX class), but the
+    # addon accepts an override here so operators can point at a CephFS /
+    # NFS class without moving the global `inv_k8s.storage_class.rwx` off
+    # whatever RWO-appropriate class the rest of civitas uses. See the
+    # RWX preflight in tasks/05_minio.yml — a block-backed class (Ceph
+    # RBD, EBS, GCE PD, Azure Disk) cannot satisfy ReadWriteMany and the
+    # PVC will sit Pending indefinitely with only a generic
+    # `waiting for external provisioner` event.
+    storage_class: "{{ inv_addons.goat.ducklake.storage_class | default(inv_k8s.storage_class.rwx) }}"
   # Ingress routing profile — controller-specific handling for the two
   # services that DO NOT support FastAPI `root_path`: geoapi and processes.
   # /core, /, /<bucket> route identically on every controller (goat-core
@@ -117,6 +150,20 @@ goat_addon:
     # Detection at runtime is possible but adds a k8s_info lookup per
     # run — expose as a plain override instead and default to v3.
     traefik_api_group: "{{ inv_addons.goat.ingress.traefik_api_group | default('traefik.io/v1alpha1') }}"
+    # `configuration-snippet` annotations require ingress-nginx to run with
+    # `allow-snippet-annotations: true` in the controller ConfigMap. Since
+    # ingress-nginx 1.9 the upstream default is `false`, and civitas
+    # historically shipped `false` cluster-wide too. The staging cluster
+    # this addon targets has it flipped to `true`, so we allow opting in
+    # per-tenant. When `true`, goat-web's ingress gets a
+    # `configuration-snippet` that rewrites `X-Forwarded-Host` to the
+    # public hostname — Next.js Server Actions validate `Origin` against
+    # `Host`/`X-Forwarded-Host`, and without this rewrite the two would
+    # disagree behind a reverse proxy ("Invalid Server Actions request").
+    # `upstream-vhost` (a plain annotation) is always set and covers the
+    # Host-header rewrite on its own; the snippet only adds the
+    # `X-Forwarded-Host` override.
+    allow_snippets: "{{ inv_addons.goat.ingress.allow_snippets | default(false) | bool }}"
     profiles:
       nginx:
         # ingress-nginx: annotation-driven regex rewrite. `use-regex: true`

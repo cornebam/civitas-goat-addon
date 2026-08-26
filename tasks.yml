@@ -52,6 +52,15 @@
   ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/01_db.yml"
   tags: ["addons"]
 
+# Certificate BEFORE the first Ingress. MinIO's Ingress in 05_minio.yml is
+# the first resource that references `<ingress-host>-tls`; creating the
+# Certificate up front lets cert-manager start the ACME order immediately
+# so the fake-cert window at the ingress is minimised. Certificate creation
+# is a no-op when neither enable_ingress nor enable_gateway is true.
+- name: "GOAT addon: provision explicit TLS Certificate"
+  ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/06_certificate.yml"
+  tags: ["addons"]
+
 - name: "GOAT addon: deploy object storage (MinIO) + DuckLake volume"
   ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/05_minio.yml"
   tags: ["addons"]
@@ -71,6 +80,16 @@
 - name: "GOAT addon: Traefik-only — create stripPrefix Middleware CRDs"
   ansible.builtin.include_tasks: "{{ addon_dir | default('') }}tasks/04_ingress_middleware.yml"
   when: inv_k8s.ingress_class == 'traefik'
+  tags: ["addons"]
+
+# Gateway API exposure — opt-in via inv_addons.goat.enable_gateway. Runs
+# after Helm so Services (`goat-web`, `goat-core`, `goat-geoapi`,
+# `goat-processes`, `minio`) that the HTTPRoute references already exist —
+# Gateway controllers otherwise mark the route as `BackendNotFound` and
+# won't proxy. `include_tasks` so `when:` short-circuits when disabled.
+- name: "GOAT addon: Gateway API — create Gateway + HTTPRoute (opt-in)"
+  ansible.builtin.include_tasks: "{{ addon_dir | default('') }}tasks/07_gateway.yml"
+  when: goat_addon.enable_gateway | default(false) | bool
   tags: ["addons"]
 
 # Everything below is handled by the chart's own post-install hooks, so the

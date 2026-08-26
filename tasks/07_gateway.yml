@@ -1,0 +1,211 @@
+# Gateway API exposure — opt-in via inv_addons.goat.enable_gateway.
+#
+# Runs in addition to (or instead of) the Ingress path. When both are true
+# during a migration, the same TLS secret is bound to both surfaces; make
+# sure DNS points to only one to avoid split-brain routing. In production,
+# pick one exposure mechanism.
+#
+# Preconditions (assert-worthy but deferred — Gateway CRDs are a cluster-
+# level install, not something the addon should apt-get for the operator):
+#   * gateway.networking.k8s.io/v1 CRDs are present
+#   * A Gateway controller is running that reconciles
+#     gatewayClassName={{ inv_k8s.gateway_class }} (NGINX Gateway Fabric,
+#     Traefik >= v3, Envoy Gateway, ...)
+#   * The Gateway controller can consume TLS secrets from *this* namespace
+#     (no ReferenceGrant needed since the secret lives in the same namespace
+#     as the Gateway)
+#
+# Why URLRewrite instead of the ingress.profiles map:
+#   Gateway API defines URLRewrite as a standardized filter across every
+#   controller — no annotations, no Middleware CRDs, no Traefik-vs-nginx
+#   split. This means the four backends behave identically regardless of
+#   the underlying controller, and the profile map (needed for the Ingress
+#   path because ingress-nginx uses regex rewrite and Traefik uses a
+#   stripPrefix Middleware CRD) has no analogue here. If GOAT ships
+#   ROOT_PATH support upstream (geoapi/processes emit correct absolute
+#   URLs), even the URLRewrite filters can be dropped in favour of plain
+#   path matches.
+
+- name: "GOAT addon: skip Gateway when disabled"
+  ansible.builtin.debug:
+    msg: "enable_gateway is false — skipping Gateway + HTTPRoute setup."
+  when: not (goat_addon.enable_gateway | default(false) | bool)
+
+- name: "GOAT addon: Gateway path — derive facts"
+  when: goat_addon.enable_gateway | default(false) | bool
+  ansible.builtin.set_fact:
+    goat_ingress_host: "{{ (goat_addon.web.subdomain | default('goat')) + '.' + (INGRESS_DOMAIN | default(DOMAIN)) }}"
+    goat_tls_secret: "{{ (goat_addon.web.subdomain | default('goat')) + '.' + (INGRESS_DOMAIN | default(DOMAIN)) }}-tls"
+
+# One HTTPS + one HTTP listener bound to the ingress-host. The Certificate
+# in 06_certificate.yml issues with `goat_ingress_host` as its single SAN.
+- name: "GOAT addon: create Gateway for {{ goat_ingress_host | default('<unresolved>') }}"
+  when: goat_addon.enable_gateway | default(false) | bool
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      metadata:
+        name: goat
+        namespace: "{{ k8s_namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: civitas-goat-addon
+          app.kubernetes.io/name: goat
+          app.kubernetes.io/part-of: goat
+      spec:
+        gatewayClassName: "{{ inv_k8s.gateway_class }}"
+        listeners:
+          - name: https-ingress
+            protocol: HTTPS
+            port: 443
+            hostname: "{{ goat_ingress_host }}"
+            allowedRoutes:
+              namespaces:
+                from: Same
+            tls:
+              mode: Terminate
+              certificateRefs:
+                - kind: Secret
+                  name: "{{ goat_tls_secret }}"
+          - name: http-ingress
+            protocol: HTTP
+            port: 80
+            hostname: "{{ goat_ingress_host }}"
+            allowedRoutes:
+              namespaces:
+                from: Same
+
+# Main HTTPRoute — five backends on one hostname, path-prefix matches.
+# `URLRewrite/ReplacePrefixMatch: /` is the Gateway-native equivalent of
+# ingress-nginx's `rewrite-target: /$2` and Traefik's stripPrefix
+# Middleware. Applied ONLY where the backend needs its prefix stripped
+# (geoapi, processes); `/`, `/core`, and `/<bucket>` pass through with
+# no rewrite for the same reasons as on the Ingress path (see
+# goat_values.yml routing table).
+#
+# `definition:` is a YAML block scalar (a string), not an inline dict.
+# Gateway API's `BackendRef.port` is int32 with no port-name alternative
+# (unlike Ingress), and Ansible without `jinja2_native` stringifies
+# `"{{ goat_s3_upstream_port }}"` when rendering inline dict values — the
+# API server then rejects `port: "9000"`. Passing the definition as text
+# lets the k8s module parse the YAML itself, so `port: 9000` (unquoted)
+# is typed as int32 at parse time. Same fix as the ExternalName Service
+# in tasks/05_minio.yml.
+- name: "GOAT addon: create HTTPRoute for goat backends"
+  when: goat_addon.enable_gateway | default(false) | bool
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
+    definition: |
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata:
+        name: goat-routes
+        namespace: {{ k8s_namespace }}
+        labels:
+          app.kubernetes.io/managed-by: civitas-goat-addon
+          app.kubernetes.io/name: goat
+          app.kubernetes.io/part-of: goat
+      spec:
+        parentRefs:
+          - name: goat
+            sectionName: https-ingress
+        hostnames:
+          - {{ goat_ingress_host }}
+        rules:
+          # /geoapi — prefix stripped
+          - matches:
+              - path:
+                  type: PathPrefix
+                  value: /geoapi
+            filters:
+              - type: URLRewrite
+                urlRewrite:
+                  path:
+                    type: ReplacePrefixMatch
+                    replacePrefixMatch: /
+            backendRefs:
+              - name: goat-geoapi
+                port: 80
+          # /processes — prefix stripped
+          - matches:
+              - path:
+                  type: PathPrefix
+                  value: /processes
+            filters:
+              - type: URLRewrite
+                urlRewrite:
+                  path:
+                    type: ReplacePrefixMatch
+                    replacePrefixMatch: /
+            backendRefs:
+              - name: goat-processes
+                port: 80
+          # /core — API_V2_STR carries the /core prefix inside the app,
+          # so no rewrite.
+          - matches:
+              - path:
+                  type: PathPrefix
+                  value: /core
+            backendRefs:
+              - name: goat-core
+                port: 80
+          # /<bucket> — MinIO ingress path MUST equal the bucket name for
+          # path-style SigV4 to validate. No rewrite. Backend mirrors the
+          # Ingress path in tasks/05_minio.yml: `minio` in in_cluster mode,
+          # the `goat-s3-upstream` ExternalName service in external mode
+          # (which proxies to `goat_addon.s3.endpoint`).
+          - matches:
+              - path:
+                  type: PathPrefix
+                  value: /{{ goat_addon.s3.bucket }}
+            backendRefs:
+              - name: {{ 'minio' if goat_addon.s3.mode == 'in_cluster' else 'goat-s3-upstream' }}
+                port: {{ goat_s3_upstream_port }}
+          # / — catch-all to goat-web (Next.js at host root).
+          - matches:
+              - path:
+                  type: PathPrefix
+                  value: /
+            backendRefs:
+              - name: goat-web
+                port: 80
+
+# HTTP→HTTPS redirect via a listener-scoped HTTPRoute. Only rendered when
+# the cluster does NOT already handle TLS termination upstream
+# (`inv_k8s.ingress.http: true` means a fronting proxy already terminates
+# TLS — redirecting again causes a loop).
+- name: "GOAT addon: create HTTP->HTTPS redirect HTTPRoute"
+  when:
+    - goat_addon.enable_gateway | default(false) | bool
+    - not (inv_k8s.ingress.http | default(false) | bool)
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata:
+        name: goat-http-redirect
+        namespace: "{{ k8s_namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: civitas-goat-addon
+          app.kubernetes.io/name: goat
+          app.kubernetes.io/part-of: goat
+      spec:
+        parentRefs:
+          - name: goat
+            sectionName: http-ingress
+        hostnames:
+          - "{{ goat_ingress_host }}"
+        rules:
+          - filters:
+              - type: RequestRedirect
+                requestRedirect:
+                  scheme: https
+                  statusCode: 301

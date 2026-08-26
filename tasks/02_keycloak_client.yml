@@ -81,6 +81,26 @@
   vars:
     query: "[?clientId== '{{ goat_addon.keycloak.client_id }}'].id | [0]"
 
+# Update the client on every run so hostname / subdomain / public_url
+# changes reflect immediately. The previous POST-once-then-409 path froze
+# `redirectUris` at first-create, and any later change surfaced at login as
+# `invalid parameter: redirect_uri`. Keycloak's PUT applies only fields in
+# the supplied representation; the client secret is NOT rotated (it lives
+# on a separate /client-secret endpoint) so `goat-keycloak-creds` remains
+# valid across updates. status_code 204 = updated (Keycloak returns no
+# body on success).
+- name: "GOAT addon: update goat-web client (idempotent host / URL refresh)"
+  uri:
+    method: PUT
+    url: "{{ inv_access.platform.hostname }}/admin/realms/{{ inv_access.tenant.realm_name }}/clients/{{ client_id_goat }}"
+    body_format: json
+    ca_path: "{{ inv_k8s.ingress.ca_path }}"
+    body: "{{ lookup('template', playbook_dir + '/addons/goat_addon/templates/goat-keycloak-client.json.j2') }}"
+    headers:
+      Accept: application/json
+      Authorization: "Bearer {{ keycloak_login.json.access_token }}"
+    status_code: 204
+
 - name: "GOAT addon: fetch goat-web client secret"
   check_mode: no
   uri:

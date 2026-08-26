@@ -15,7 +15,9 @@ Installs the GOAT Helm chart (`oci://ghcr.io/plan4better/charts/goat` v0.4.x) in
 
 ## Routing
 
-The whole stack is served from **one hostname** — `inv_addons.goat.web.public_url` (default `https://goat.<DOMAIN>`). Path prefixes route to services; the ingress class is `inv_k8s.ingress_class`, TLS is one shared secret (`goat-<DOMAIN>-tls`) since a single hostname can only be served by one certificate.
+The whole stack is served from **one Ingress hostname** (`<subdomain>.<INGRESS_DOMAIN | default(DOMAIN)>`). Path prefixes route to services; the ingress class is `inv_k8s.ingress_class`, TLS is one shared secret (`<ingress-host>-tls`) issued by an explicit `Certificate` resource created by `tasks/06_certificate.yml`. Five Ingresses reference the same secret; owning the Certificate ourselves prevents cert-manager's ingress-shim from spawning five racing reconcilers.
+
+The browser-facing URL (`web.public_url`, default `https://<subdomain>.<DOMAIN>`) drives `NEXT_PUBLIC_*`, `NEXTAUTH_URL`, `CLIENT_URL`, `web.auth.publicUrl`, Keycloak `redirectUris`/`webOrigins`/`postLogoutRedirectUris`, and `S3_PUBLIC_ENDPOINT_URL`. When there is no fronting reverse proxy, `DOMAIN == INGRESS_DOMAIN` and the public URL host equals the ingress host. `nginx.ingress.kubernetes.io/upstream-vhost` is set on every Ingress so the `Host` header the pod sees matches the browser-facing name — Next.js Server Actions' Origin/Host check passes, and SigV4 signatures on presigned S3 URLs validate. On `goat-web` an additional `X-Forwarded-Host` rewrite is available via `configuration-snippet` (requires `allow-snippet-annotations: true` in the ingress-nginx ConfigMap — opt-in via `inv_addons.goat.ingress.allow_snippets: true`; upstream default is `false` since 1.9).
 
 | Path prefix     | Service          | Mechanism                                                                                |
 |-----------------|------------------|------------------------------------------------------------------------------------------|
@@ -80,6 +82,11 @@ inv_addons:
     chart:
       ref: "oci://ghcr.io/plan4better/charts/goat"
       version: "0.4.0"
+    # Exposure switches. Ingress is the default; Gateway API is opt-in and
+    # requires gateway.networking.k8s.io CRDs + a controller reconciling
+    # `inv_k8s.gateway_class` (NGINX Gateway Fabric, Traefik >= v3, …).
+    enable_ingress: true
+    enable_gateway: false
     db:
       # Optional — Postgres database names. Defaults shown.
       # Override only if you need to co-tenant multiple goat installs in
@@ -89,10 +96,20 @@ inv_addons:
       windmill_db_name: "windmill"
     keycloak:
       client_id: "goat-web"
+    ingress:
+      # Turn on `configuration-snippet` annotations (X-Forwarded-Host
+      # rewrite). Requires `allow-snippet-annotations: true` in the
+      # ingress-nginx ConfigMap — default `false` since ingress-nginx 1.9.
+      allow_snippets: false
     web:
-      # Public-facing URL of the whole goat stack. Everything is served
-      # from this hostname and routed by path prefix — see Routing table.
-      public_url: "https://goat.{{ DOMAIN }}"
+      # Base subdomain. Composed with DOMAIN / INGRESS_DOMAIN to yield the
+      # ingress host and the public URL — see "Routing".
+      subdomain: "goat"
+      # Optional override for the browser-facing URL. Leave unset to
+      # accept the default `https://<subdomain>.<DOMAIN>`. Set explicitly
+      # only for dev setups where the browser URL is not derived from
+      # subdomain + DOMAIN.
+      # public_url: "https://goat.{{ DOMAIN }}"
     s3:
       # Bucket name. Also the path prefix on the in-cluster MinIO ingress:
       # presigned URLs are path-style, so any deviation from `/<bucket>`
@@ -103,9 +120,10 @@ inv_addons:
       # S3-compatible endpoint (external MinIO, R2, Wasabi, B2, AWS S3).
       # See §External S3.
       mode: "in_cluster"
-      # External-mode fields — required when mode: external.
+      # External-mode endpoint — required when mode: external. Only the
+      # cluster-internal URL is configured; the browser-facing S3 URL is
+      # always the public GOAT URL in both modes (see §External S3).
       endpoint: ""            # http(s)://... cluster-visible (in-pod code)
-      public_endpoint: ""     # https://... browser-visible (presigned URLs)
       # External-mode credentials — required when mode: external.
       # Keep in ansible-vault; the addon writes them into a
       # `goat-s3-credentials` Secret in the goat namespace.
@@ -119,7 +137,7 @@ inv_addons:
 
 ### External S3-compatible object storage
 
-Set `inv_addons.goat.s3.mode: external` to skip the addon's in-cluster MinIO Deployment/Service/Ingress and point every S3-consuming service (goat-core, geoapi, processes, both windmill workers, DuckLake bootstrap) at a pre-existing endpoint. Works for any S3-compatible service: MinIO elsewhere in the cluster, Cloudflare R2, Wasabi, Backblaze B2, or real AWS S3.
+Set `inv_addons.goat.s3.mode: external` to skip the addon's in-cluster MinIO Deployment/Service and point every S3-consuming service (goat-core, geoapi, processes, both windmill workers, DuckLake bootstrap) at a pre-existing endpoint. Works for any S3-compatible service: MinIO elsewhere in the cluster, Cloudflare R2, Wasabi, Backblaze B2, or real AWS S3.
 
 ```yaml
 inv_addons:
@@ -128,7 +146,6 @@ inv_addons:
       bucket: "goat"
       mode: "external"
       endpoint: "https://s3.eu-central-1.amazonaws.com"
-      public_endpoint: "https://goat.s3.eu-central-1.amazonaws.com"
       region: "eu-central-1"
       provider: "aws"
       force_path_style: false
@@ -137,15 +154,17 @@ inv_addons:
       secret_key: "{{ secrets.inv_addons.goat.s3_secret_key }}"
 ```
 
+**Browser-facing endpoint = public GOAT URL, always.** There is no `public_endpoint` variable to set. In both modes the addon deploys a `/<bucket>` Ingress on the public GOAT host; presigned URLs returned by goat-core embed that URL as `S3_PUBLIC_ENDPOINT_URL`. In `in_cluster` mode the Ingress backend is the addon-deployed MinIO Service; in `external` mode it is a namespace-local `ExternalName` Service (`goat-s3-upstream`) that resolves to `endpoint`. This keeps the browser origin equal to the GOAT origin — no second host to cover with a TLS cert, no cross-origin CORS surface.
+
 Preconditions (all asserted at addon start when `mode: external`):
 
 1. **`access_key` + `secret_key` supplied** via inventory (source them from ansible-vault under `secrets.inv_addons.goat.s3_access_key` / `s3_secret_key`). The addon materializes them into a `goat-s3-credentials` Secret in the goat namespace on every run — no manual `kubectl create secret` step and no cross-namespace secret references. If your credentials live in a Secret elsewhere, copy the values into the vault once; the addon owns the in-namespace Secret from then on.
 2. **Bucket** identified by `s3.bucket` **already exists** at the endpoint. The addon skips its `goat-bucket-init` Job in external mode — external credentials are typically scoped to a specific bucket without `s3:CreateBucket`, and the bucket is provisioned by the operator (Terraform, cloud console, `mc mb`, etc.) before the playbook runs. The credentials must have `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, and `s3:ListBucket` on this bucket — DuckLake-init writes catalog metadata to it on every run.
-3. **`endpoint`** is reachable from the goat namespace (in-cluster DNS or public network). Used by boto3 / DuckDB / `mc` inside pods.
-4. **`public_endpoint`** is reachable from the browser. Substituted into presigned URLs returned by goat-core. Must serve the bucket at `/<bucket>` when `force_path_style: true`, or as `<bucket>.<host>` when `force_path_style: false` — SigV4 signs the canonical URI, so any URI rewrite en route breaks signatures.
-5. **`region`** matches how SigV4 is signed on the target. AWS S3 requires the bucket's actual region; MinIO / R2 / etc. usually accept any value but should match what the endpoint advertises.
-6. **`force_path_style`**: `true` (default) works for MinIO / R2 / Wasabi / Backblaze B2. Real AWS S3 has been deprecating path-style since 2020 and buckets created in some regions after that date only accept virtual-hosted-style — set `false`.
-7. **`provider`**: passed through as `S3_PROVIDER` to goat-core / geoapi / processes / windmill workers. Default `minio` matches historical behavior; set `aws` for real AWS S3 if goat-core's config.py branches on it.
+3. **`endpoint`** is reachable from the goat namespace (in-cluster DNS or public network). Used by boto3 / DuckDB / `mc` inside pods, and by the `goat-s3-upstream` `ExternalName` Service (a plain DNS alias — `endpoint` must be a hostname, not an IP literal). Operator-side firewall rules must permit egress from the goat namespace to the storage host; the addon does not test reachability.
+4. **`region`** matches how SigV4 is signed on the target. AWS S3 requires the bucket's actual region; MinIO / R2 / etc. usually accept any value but should match what the endpoint advertises.
+5. **`force_path_style`**: `true` (default) works for MinIO / R2 / Wasabi / Backblaze B2. Real AWS S3 has been deprecating path-style since 2020 and buckets created in some regions after that date only accept virtual-hosted-style — set `false`.
+6. **`provider`**: passed through as `S3_PROVIDER` to goat-core / geoapi / processes / windmill workers. Default `minio` matches historical behavior; set `aws` for real AWS S3 if goat-core's config.py branches on it.
+7. **CORS at the storage backend.** Because the browser talks to the S3 via the `/<bucket>` path on the public GOAT host, the presigned request looks (to the pod that ultimately handles it) like `Host: <public GOAT host>` — this is set explicitly through `nginx.ingress.kubernetes.io/upstream-vhost` so SigV4 validates. If the external S3 enforces a CORS allow-list on the request `Origin`, the operator must add the public GOAT origin (`https://<subdomain>.<DOMAIN>`) to it. Symptom when missing: uploads fail with an opaque CORS error against a healthy backend. Out of scope for the addon.
 
 **DuckLake catalog binding.** The DuckLake catalog metadata (Postgres `ducklake.*` tables) stores the S3 endpoint written at bootstrap. Switching `endpoint` on an existing install leaves the catalog pointing at the old location; the addon's DuckLake init sets `AUTOMATIC_MIGRATION TRUE` on ATTACH which handles catalog *format* upgrades, but not endpoint relocation. Treat endpoint changes as a re-bootstrap.
 
@@ -204,12 +223,20 @@ yq '.software.addon_goat.images[] | "\(.registry)/\(.repository):\(.tag)"' \
 
 ## Known caveats
 
+- **`subdomain` and `web.public_url` are load-bearing across the whole stack**: `inv_addons.goat.web.subdomain` composes the ingress-visible hostname (`<subdomain>.<INGRESS_DOMAIN>`) and the browser-facing URL (`https://<subdomain>.<DOMAIN>`); `web.public_url` optionally overrides the latter. Together they drive every `NEXT_PUBLIC_*` env baked into the goat-web bundle, `CLIENT_URL` on goat-core, the Keycloak `redirectUris` / `webOrigins` / `postLogoutRedirectUris`, and `S3_PUBLIC_ENDPOINT_URL` (for in-cluster MinIO). The ingress name must resolve to the ingress load balancer — DNS record and cluster-issuer both have to agree. Changing subdomain or domain rotates the addon into a new host-derived TLS secret (`<ingress-host>-tls`); the OLD secret lingers in the namespace after the change and should be deleted manually to reclaim quota. The Keycloak client is PUT on every run against the same URL template, so hostname changes now propagate to `redirectUris` immediately — no more `invalid parameter: redirect_uri` after a rename.
+
+- **The `cacert` mount and CA env vars are conditional on `inv_k8s.ingress.ca_path`**: the `NODE_EXTRA_CA_CERTS` (web) and `REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE` (geoapi, processes) env vars, together with the `cacert` `extraVolumes` / `extraVolumeMounts` on those three services, are only rendered when `inv_k8s.ingress.ca_path` is set — the same condition that gates the `cacert` ConfigMap in `tasks/00_namespace.yml`. On clusters that use an ACME-issued certificate (chain trusted by the Node / OpenSSL default store), leave `ca_path` unset and no bundle is mounted. Previously the env vars were always emitted and goat-web logged `Warning: Ignoring extra certs from /etc/ssl/cacert/cacert.crt … No such file or directory` at every start. Do NOT substitute `kube-root-ca.crt`: that ConfigMap signs `kubernetes.default.svc`, not the public ingress cert, and is useless as a trust anchor for outbound HTTPS.
+
+- **`goat-web` server-side fetches hairpin through the ingress**: the Next.js server calls `NEXT_PUBLIC_API_URL` from inside the pod (SSR of the org-creation flow), which routes back out through the same ingress that serves the browser. Until a valid cert is served on the ingress host, Node rejects the chain with `SELF_SIGNED_CERT_IN_CHAIN` and the UI silently loops on the organization-creation screen — no error in the browser console, no HTTP error visible to the user, just an endless refresh (the POST to `/organizations` on the second attempt then answers `{"detail":"User has already an organization"}` even though the frontend never got the first response). Confirm the cert served on the ingress host is trusted by the goat-web pod (`NODE_EXTRA_CA_CERTS` mounts the civitas CA bundle from `inv_k8s.ingress.ca_path` — set that in inventory when the ingress cert chains up through a private CA; a real ACME cert needs no extra bundle).
+
 - **Postgres-operator stale-password**: if civitas's Zalando postgres-operator has lost its in-memory state (K8s secret rotated but DB password unchanged), `01_db.yml` will hang waiting for the goat secret to appear. Restart the operator and retry:
   ```sh
   kubectl -n cc-loc-operation-stack delete pod -l app.kubernetes.io/name=postgres-operator
   ```
 
 - **`storage_class` is a dict, not a string**: civitas-core's `inv_k8s.storage_class` is `{loc, rwo, rwx}`. The chart wants a single string; the rendered values file picks `loc` by default. Override `inv_k8s.storage_class.loc` (or edit `templates/goat_values.yml` in a fork) for multi-node setups that need `rwx` storage.
+
+- **`local-path` for the DuckLake PVC is single-node ONLY**: `local-path` is not a CSI driver and does not reject `ReadWriteMany` at bind time — it silently binds RWX on any node, and each node then gets a *separate empty directory*. On multi-node clusters this means `layer_import` (worker-tools) writes parquet files that `geoapi` cannot see, with no error anywhere: the tile requests just return empty results. Use a real RWX class (CephFS / NFS / EFS) on multi-node, or pin the data-touching pods to a single node. The addon accepts `inv_addons.goat.ducklake.storage_class` as an override so operators can point at a filesystem-backed class without moving `inv_k8s.storage_class.rwx` globally — block-backed classes (Ceph RBD, EBS, GCE PD, Azure Disk) cannot satisfy RWX and the PVC will sit Pending indefinitely with only a generic "waiting for external provisioner" event.
 
 - **`goat-core` has no curl**: the image is stripped to essentials. Don't write tasks that `kubernetes.core.k8s_exec` shell-out into the container; rely on Kubernetes probes instead.
 

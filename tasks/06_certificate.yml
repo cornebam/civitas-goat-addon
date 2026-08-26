@@ -1,0 +1,71 @@
+# One explicit Certificate for the whole goat stack instead of relying on
+# cert-manager's ingress-shim.
+#
+# Historically each of the five Ingresses (core/geoapi/processes/web + MinIO)
+# carried a `cert-manager.io/cluster-issuer` annotation and the same
+# `secretName`. ingress-shim then created five Certificate resources named
+# after the shared secret, each with an ownerReference on a different
+# Ingress. All five reconcilers competed to write the same object, and
+# subdomain/domain changes reissued into the same secret while the old
+# certificate lingered — ingress-nginx sometimes served the stale
+# certificate whose SAN did not match the requested SNI and returned a
+# bare `400 Bad Request`, with the actual cause only visible in the
+# controller log (not on Ingress or Certificate status).
+#
+# Owning the Certificate explicitly here:
+#   * exactly one Certificate resource per goat namespace
+#   * secretName == goat_tls_secret (derived from goat_ingress_host, not
+#     from DOMAIN, so subdomain/domain changes rotate to a new secret)
+#   * cert-manager reissues without racing five Ingress ownerReferences
+#
+# The `cert-manager.io/cluster-issuer` annotation is intentionally REMOVED
+# from all five Ingresses. Each Ingress keeps its `tls:` block — that is
+# what ingress-nginx uses to bind the certificate to the server block; the
+# annotation would only trigger the shim to create a *second* Certificate.
+#
+# Skipped when neither Ingress nor Gateway API is enabled — Gateway path
+# consumes the same secret via listener.tls.certificateRefs (see
+# 07_gateway.yml).
+- name: "GOAT addon: skip Certificate when no exposure is enabled"
+  ansible.builtin.debug:
+    msg: >-
+      Both enable_ingress and enable_gateway are false — no TLS secret is
+      needed. Set inv_addons.goat.enable_ingress or enable_gateway to
+      expose the stack.
+  when:
+    - not (goat_addon.enable_ingress | default(true) | bool)
+    - not (goat_addon.enable_gateway | default(false) | bool)
+
+- name: "GOAT addon: derive certificate host + secret from inventory"
+  when: (goat_addon.enable_ingress | default(true) | bool)
+        or (goat_addon.enable_gateway | default(false) | bool)
+  ansible.builtin.set_fact:
+    goat_ingress_host: "{{ (goat_addon.web.subdomain | default('goat')) + '.' + (INGRESS_DOMAIN | default(DOMAIN)) }}"
+    goat_tls_secret: "{{ (goat_addon.web.subdomain | default('goat')) + '.' + (INGRESS_DOMAIN | default(DOMAIN)) }}-tls"
+
+# Single SAN — the ingress-host. `secretName` derives from
+# `goat_ingress_host` and rotates on subdomain/domain changes.
+- name: "GOAT addon: create explicit Certificate for {{ goat_ingress_host | default('<unresolved>') }}"
+  when: (goat_addon.enable_ingress | default(true) | bool)
+        or (goat_addon.enable_gateway | default(false) | bool)
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
+    definition:
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: "{{ goat_tls_secret }}"
+        namespace: "{{ k8s_namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: civitas-goat-addon
+          app.kubernetes.io/name: goat
+          app.kubernetes.io/part-of: goat
+      spec:
+        secretName: "{{ goat_tls_secret }}"
+        issuerRef:
+          kind: ClusterIssuer
+          name: "{{ inv_k8s.cert_manager.issuer_name }}"
+        dnsNames:
+          - "{{ goat_ingress_host }}"

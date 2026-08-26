@@ -30,11 +30,14 @@
 # see the same files — hence one PVC mounted on tools/workflows/geoapi via
 # the chart's existingClaim wiring + extraVolumes (goat_values.yml).
 #
-# Storage class: inv_k8s.storage_class.rwx — production clusters set this to
-# a real RWX class (NFS / Longhorn). Civitas's default `local-path` is
-# RWO-only; multi-pod sharing relies on all data-touching pods co-scheduling
-# on the same node (see README "Known caveats"). Switch the operator's
-# storage class for production HA.
+# Storage class: `goat_addon.ducklake.storage_class` — defaults to
+# `inv_k8s.storage_class.rwx` (the cluster-wide RWX class). The addon
+# accepts an override so operators can point at a CephFS / NFS class
+# without moving the global off whatever the rest of civitas uses. See
+# README "Known caveats" — block-backed classes (Ceph RBD, EBS, GCE PD,
+# Azure Disk) cannot satisfy ReadWriteMany and leave the PVC Pending
+# indefinitely; `local-path` (RWO-only) works single-node but silently
+# fragments per-node and causes empty-tile symptoms on multi-node.
 - name: "GOAT addon: create shared DuckLake data PVC"
   kubernetes.core.k8s:
     state: present
@@ -54,7 +57,7 @@
           # cannot provision RWX — set pvc_access_mode: ReadWriteOnce there
           # (sharing then relies on co-scheduling, see README).
           - "{{ goat_addon.ducklake.pvc_access_mode | default('ReadWriteMany') }}"
-        storageClassName: "cephhstg-cephfs" # {{ inv_k8s.storage_class.rwx }}"
+        storageClassName: "{{ goat_addon.ducklake.storage_class }}"
         resources:
           requests:
             storage: "{{ goat_addon.ducklake.pvc_size | default('20Gi') }}"
@@ -69,16 +72,18 @@
       goat_addon.s3.mode = '{{ goat_addon.s3.mode }}' but must be one of
       'in_cluster' or 'external'. See vars/default.yml.
 
-# External-mode preflights. Endpoint fields plus non-empty credentials
-# (the addon writes them into the `goat-s3-credentials` Secret below).
+# External-mode preflights. Cluster-internal endpoint plus non-empty
+# credentials (the addon writes them into the `goat-s3-credentials`
+# Secret below). No `public_endpoint` is configured — the browser-facing
+# URL is always the public GOAT URL (see the mode-agnostic MinIO ingress
+# below + the ExternalName service that stands in for the external S3).
 - name: "GOAT addon: preflight — external S3 endpoint config"
   ansible.builtin.assert:
     that:
       - goat_addon.s3.endpoint | length > 0
-      - goat_addon.s3.public_endpoint | length > 0
     fail_msg: >-
-      goat_addon.s3.mode = 'external' but endpoint / public_endpoint is
-      empty. Set both in inventory under inv_addons.goat.s3.
+      goat_addon.s3.mode = 'external' but endpoint is empty. Set
+      inv_addons.goat.s3.endpoint to the cluster-internal S3 URL.
   when: goat_addon.s3.mode == 'external'
 
 - name: "GOAT addon: preflight — external S3 credentials provided"
@@ -91,6 +96,20 @@
       empty. Set inv_addons.goat.s3.access_key / secret_key (source them
       from ansible-vault).
   when: goat_addon.s3.mode == 'external'
+
+# Compute the S3 upstream port as a native int and stash it on a fact.
+# Rationale: Ansible (without `jinja2_native`) stringifies any `"{{ …
+# | int }}"` scalar it renders, so passing the result inline into a k8s
+# `definition:` dict yields `port: "9000"` and the API server rejects it
+# with `cannot unmarshal string into … ServicePort.spec.ports.port of
+# type int32`. `set_fact` stores the raw Python type of a single Jinja
+# expression, and Ansible's templar preserves that type for bare
+# `"{{ var }}"` references — so we materialise the int here and reference
+# it as a bare var at both use sites (ExternalName Service + MinIO
+# Ingress backend).
+- name: "GOAT addon: resolve S3 upstream port"
+  ansible.builtin.set_fact:
+    goat_s3_upstream_port: "{{ 9000 if goat_addon.s3.mode == 'in_cluster' else ((goat_addon.s3.endpoint | urlsplit('port')) | default(9000, true) | int) }}"
 
 # In-cluster mode reuses credentials across reruns if a prior run left a
 # Secret behind — the k8s_info lookup below feeds the reuse branch.
@@ -232,20 +251,63 @@
 #
 # The ingress path MUST equal `/` + bucket name. GOAT uses path-style S3
 # (`S3_FORCE_PATH_STYLE=true`), so presigned URLs look like
-# `https://<goat_host>/<bucket>/<key>?X-Amz-Signature=…`. SigV4 signs the
+# `<goat_public_url>/<bucket>/<key>?X-Amz-Signature=…`. SigV4 signs the
 # canonical URI, so any nginx rewrite that alters the path breaks every
 # signature. This ingress therefore adds NO rewrite-target annotation and
 # uses the bucket name as its prefix.
 #
-# Shares goat_host (derived from goat_addon.web.public_url) and the same
-# TLS secret as the goat_values.yml ingresses — one hostname cannot be
-# served by multiple secrets.
-- name: "GOAT addon: derive goat_host + S3 ingress path from inventory"
-  when: goat_addon.s3.mode == 'in_cluster'
+# Hosts:
+#   * goat_ingress_host — the ingress-host (SNI + Host + TLS secret),
+#     shared with the chart's four ingresses and with the Certificate in
+#     06_certificate.yml. The MinIO Ingress terminates TLS on this name.
+#   * goat_public_url — what the browser sees. Substituted into
+#     S3_PUBLIC_ENDPOINT_URL (rendered in the chart values); presigned URLs
+#     the browser follows point at this URL.
+- name: "GOAT addon: derive goat ingress + public + S3 ingress path from inventory"
   ansible.builtin.set_fact:
-    goat_host: "{{ goat_addon.web.public_url | regex_replace('^https?://', '') }}"
+    goat_subdomain: "{{ goat_addon.web.subdomain | default('goat') }}"
+    goat_ingress_host: "{{ (goat_addon.web.subdomain | default('goat')) + '.' + (INGRESS_DOMAIN | default(DOMAIN)) }}"
+    goat_public_url: "{{ goat_addon.web.public_url | default('https://' + (goat_addon.web.subdomain | default('goat')) + '.' + DOMAIN) }}"
+    goat_tls_secret: "{{ (goat_addon.web.subdomain | default('goat')) + '.' + (INGRESS_DOMAIN | default(DOMAIN)) }}-tls"
     s3_ingress_path: "/{{ goat_addon.s3.bucket }}"
-    s3_tls_secret_name: "goat-{{ DOMAIN }}-tls"
+
+# External-mode only: proxy target for the `/<bucket>` Ingress below.
+# Ingress backends must live in the same namespace; the external S3 is
+# reachable from inside the cluster (operator-side network) but not
+# from the public internet, so goat-web's presigned URLs (browser →
+# public GOAT URL) would fail without an in-namespace representation
+# of it. `ExternalName` stands in for the remote host as a plain DNS
+# alias — assumes `endpoint` is a hostname, not an IP literal.
+#
+# `definition:` is a YAML block scalar (a string), not an inline dict.
+# Why: Ansible without `jinja2_native` renders every `"{{ … }}"` scalar
+# as a string, so an inline dict yields `port: "9000"` and the API
+# server rejects it with `cannot unmarshal string into … ServicePort
+# .spec.ports.port of type int32`. As a string, the k8s module parses
+# the definition as YAML itself — `port: 9000` (unquoted) is typed as
+# int32 at parse time, bypassing the Jinja stringification.
+- name: "GOAT addon: create ExternalName service for external S3"
+  when: goat_addon.s3.mode == 'external'
+  kubernetes.core.k8s:
+    state: present
+    kubeconfig: "{{ k8s_config }}"
+    context: "{{ k8s_context }}"
+    definition: |
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: goat-s3-upstream
+        namespace: {{ k8s_namespace }}
+        labels:
+          app.kubernetes.io/name: goat
+          app.kubernetes.io/part-of: goat
+          app.kubernetes.io/managed-by: civitas-goat-addon
+      spec:
+        type: ExternalName
+        externalName: {{ goat_addon.s3.endpoint | urlsplit('hostname') }}
+        ports:
+          - name: api
+            port: {{ goat_s3_upstream_port }}
 
 # nginx: default request body limit is 1 MB and default read/send timeouts
 # are 60s — both break dataset uploads to MinIO, hence the four annotations
@@ -257,21 +319,38 @@
 # `set_fact` preserves the dict type only when the whole value is a single
 # `{{ expr }}` — do NOT use `>-` here, that folds to a string.
 - name: "GOAT addon: build MinIO ingress annotations for {{ inv_k8s.ingress_class }}"
-  when: goat_addon.s3.mode == 'in_cluster'
   ansible.builtin.set_fact:
-    minio_ingress_annotations: "{{ minio_base_annotations | combine(minio_nginx_annotations if inv_k8s.ingress_class == 'nginx' else {}) }}"
+    minio_ingress_annotations: "{{ minio_base_annotations | combine(minio_nginx_annotations if inv_k8s.ingress_class == 'nginx' else {}) | combine(minio_external_annotations if (inv_k8s.ingress_class == 'nginx' and goat_addon.s3.mode == 'external') else {}) }}"
   vars:
-    minio_base_annotations:
-      cert-manager.io/cluster-issuer: "{{ inv_k8s.cert_manager.issuer_name }}"
-      kubernetes.io/ingress.class: "{{ inv_k8s.ingress_class }}"
+    # `cert-manager.io/cluster-issuer` intentionally omitted — the Certificate
+    # is owned by tasks/06_certificate.yml; leaving the annotation on made
+    # five reconcilers (four chart ingresses + this one) race for one
+    # object. `kubernetes.io/ingress.class` intentionally omitted —
+    # deprecated, silently diverges from spec.ingressClassName. No
+    # `rewrite-target` in any branch: SigV4 signs the canonical URI and
+    # the upstream S3 expects exactly `/<bucket>/<key>` in path style.
+    minio_base_annotations: {}
     minio_nginx_annotations:
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      # ssl-redirect follows civitas-core convention: clusters that
+      # terminate TLS at the ingress redirect (http=false); clusters where
+      # a fronting proxy already terminates TLS skip the redirect to avoid
+      # a loop (http=true).
+      nginx.ingress.kubernetes.io/ssl-redirect: "{{ 'false' if (inv_k8s.ingress.http | default(false)) else 'true' }}"
+      nginx.ingress.kubernetes.io/whitelist-source-range: "{{ user_whitelist | default(['0.0.0.0/0']) | join(',') }}"
       nginx.ingress.kubernetes.io/proxy-body-size: "5g"
       nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
       nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    minio_external_annotations:
+      # ingress-nginx resolves ExternalName Service endpoints only at
+      # config reload by default — a value change in the Service
+      # (`externalName:`) does not propagate. `service-upstream: "true"`
+      # switches the upstream to reference the Service ClusterIP, so
+      # ingress-nginx re-resolves the ExternalName on every request via
+      # in-cluster DNS. Required on any release that still ships the
+      # old resolver behaviour.
+      nginx.ingress.kubernetes.io/service-upstream: "true"
 
 - name: "GOAT addon: assert S3 ingress path matches bucket name"
-  when: goat_addon.s3.mode == 'in_cluster'
   ansible.builtin.assert:
     that:
       - s3_ingress_path == '/' + goat_addon.s3.bucket
@@ -279,8 +358,30 @@
       The MinIO ingress path must equal '/' + the bucket name, otherwise
       path-style presigned URL signatures will not validate.
 
+# Paths list for the single ingress-host rule below. Kept as a `set_fact`
+# to keep the backend + path definition out of the Ingress definition
+# inline (Ansible/Jinja stringification of ints in inline dicts).
+- name: "GOAT addon: build MinIO ingress paths"
+  ansible.builtin.set_fact:
+    minio_ingress_paths:
+      - path: "{{ s3_ingress_path }}"
+        pathType: Prefix
+        backend:
+          service:
+            # in_cluster mode: the MinIO Deployment this file provisions.
+            # external mode: the ExternalName service above proxies to
+            # `goat_addon.s3.endpoint`.
+            name: "{{ 'minio' if goat_addon.s3.mode == 'in_cluster' else 'goat-s3-upstream' }}"
+            # Named port (`api`) instead of an int sidesteps Ansible/Jinja
+            # stringification of ints in k8s `definition:` dicts. Both
+            # Services (in_cluster MinIO + ExternalName) expose an `api`
+            # port so the reference resolves in either mode.
+            port:
+              name: api
+
 - name: "GOAT addon: deploy MinIO public ingress (for browser uploads)"
-  when: goat_addon.s3.mode == 'in_cluster'
+  when:
+    - goat_addon.enable_ingress | default(true) | bool
   kubernetes.core.k8s:
     state: present
     kubeconfig: "{{ k8s_config }}"
@@ -291,25 +392,26 @@
       metadata:
         name: minio
         namespace: "{{ goat_addon.namespace }}"
+        # `name` + `part-of` match the labels the goat Helm chart emits on
+        # its four ingresses, so cluster-wide selectors that inventory the
+        # goat stack (e.g. `-l app.kubernetes.io/name=goat`) find this one
+        # too — without them the MinIO ingress was invisible to those
+        # queries and easy to miss when debugging routing.
         labels:
           app.kubernetes.io/managed-by: civitas-goat-addon
+          app.kubernetes.io/name: goat
+          app.kubernetes.io/part-of: goat
         annotations: "{{ minio_ingress_annotations }}"
       spec:
         ingressClassName: "{{ inv_k8s.ingress_class }}"
         tls:
           - hosts:
-              - "{{ goat_host }}"
-            secretName: "{{ s3_tls_secret_name }}"
+              - "{{ goat_ingress_host }}"
+            secretName: "{{ goat_tls_secret }}"
         rules:
-          - host: "{{ goat_host }}"
+          - host: "{{ goat_ingress_host }}"
             http:
-              paths:
-                - path: "{{ s3_ingress_path }}"
-                  pathType: Prefix
-                  backend:
-                    service:
-                      name: minio
-                      port: { number: 9000 }
+              paths: "{{ minio_ingress_paths }}"
 
 - name: "GOAT addon: wait for MinIO to be ready"
   when: goat_addon.s3.mode == 'in_cluster'

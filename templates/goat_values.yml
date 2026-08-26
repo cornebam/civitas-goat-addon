@@ -1,23 +1,36 @@
 # templates/goat_values.yml — rendered in-memory by tasks/templates/k8s-helm.yml
 # Rendered by 03_helm_install.yml and passed to `helm install` as a values file.
 #
-# The whole stack is served from a single hostname (`goat_host`, derived from
-# goat_addon.web.public_url — the operator sets it in inventory as
-# inv_addons.goat.web.public_url). Path map:
+# Path map, all rooted on the ingress-host:
 #
 #   /                → goat-web       (host root, no rewrite)
 #   /core            → goat-core      (API_V2_STR handles the prefix, no rewrite)
-#   /geoapi          → geoapi         (nginx rewrite-target)
-#   /processes       → processes      (nginx rewrite-target)
+#   /geoapi          → geoapi         (nginx rewrite-target / traefik middleware)
+#   /processes       → processes      (nginx rewrite-target / traefik middleware)
 #   /<bucket>        → MinIO (05_minio.yml) — path prefix must EQUAL the bucket
 #                                       name so path-style SigV4 signatures
 #                                       validate; no rewrite.
 #   (windmill has no public ingress — processes reaches it in-cluster only)
 #
-# All ingresses share the same TLS secret (`s3_tls_secret_name`) since one
-# hostname cannot be served by multiple secrets.
-{%- set goat_host = goat_addon.web.public_url | regex_replace('^https?://', '') %}
-{%- set s3_tls_secret_name = 'goat-' + DOMAIN + '-tls' %}
+# TLS secret is derived from `goat_ingress_host` — cert-manager binds the
+# certificate to the ingress-visible name, and changing subdomain/domain
+# reissues into a new secret (the old one lingers and must be deleted
+# manually, see README). Host-derived naming also matches the civitas-core
+# convention (monitoring.{{ INGRESS_DOMAIN }}-tls etc.). The `-tls` suffix
+# is civitas-core canonical (grafana.<INGRESS_DOMAIN>-tls, api.…-tls, …);
+# only the airflow addon dropped the suffix.
+#
+# `goat_public_host` is kept for the web `X-Forwarded-Host` snippet: the
+# header the pod sees must match the browser-facing name so Next.js
+# Server Actions' Origin/Host check passes. It is NOT listed as an
+# Ingress host or Certificate SAN.
+{%- set goat_subdomain    = goat_addon.web.subdomain | default('goat') %}
+{%- set goat_ingress_host = goat_subdomain + '.' + (INGRESS_DOMAIN | default(DOMAIN)) %}
+{%- set goat_public_url   = goat_addon.web.public_url | default('https://' + goat_subdomain + '.' + DOMAIN) %}
+{%- set goat_public_host  = goat_public_url | regex_replace('^https?://', '') | regex_replace('/+$', '') %}
+{%- set goat_tls_secret   = goat_ingress_host + '-tls' %}
+{%- set goat_enable_ingress = goat_addon.enable_ingress | default(true) | bool %}
+{%- set goat_allow_snippets = goat_addon.ingress.allow_snippets | default(false) | bool %}
 {#- S3 endpoint resolution. When `goat_addon.s3.mode == 'external'`, every
     chart service (goat-core / geoapi / processes / windmill worker-tools /
     workflows) points at the external S3-compatible endpoint (external
@@ -26,18 +39,22 @@
 
     `s3_internal_endpoint` is the cluster-internal URL used by in-pod
     boto3 / DuckDB. `s3_public_endpoint` is the browser-facing URL
-    substituted into presigned URLs — for the default MinIO it's the
-    /<bucket> path on `goat_host`; for external services it's whatever
-    the operator's inventory says (e.g. AWS S3 hostname, or an internal
-    reverse proxy). `s3_endpoint_hostport` strips the scheme (and any
-    trailing slash) because DuckDB's `s3_endpoint` setting wants host:port
-    only. `s3_use_ssl` / `s3_url_style` are the DuckDB-shaped equivalents
-    of `S3_ENDPOINT_URL` scheme + `S3_FORCE_PATH_STYLE`. #}
+    substituted into presigned URLs — always `goat_public_url` in BOTH
+    modes: the addon deploys a `/<bucket>` Ingress in the goat namespace
+    that proxies to the in-cluster MinIO (in_cluster mode) or to an
+    `ExternalName` service pointing at the operator's S3 endpoint
+    (external mode). This keeps the browser origin equal to the GOAT
+    origin — no CORS surface across a second host, no `public_endpoint`
+    override to keep in sync. `s3_endpoint_hostport` strips the scheme
+    (and any trailing slash) because DuckDB's `s3_endpoint` setting
+    wants host:port only. `s3_use_ssl` / `s3_url_style` are the
+    DuckDB-shaped equivalents of `S3_ENDPOINT_URL` scheme +
+    `S3_FORCE_PATH_STYLE`. #}
 {%- set _s3 = goat_addon.s3 %}
 {%- set s3_external = (_s3.mode == 'external') %}
 {%- set s3_provider = _s3.provider %}
 {%- set s3_internal_endpoint = _s3.endpoint if s3_external else 'http://minio.' + goat_addon.namespace + '.svc.cluster.local:9000' %}
-{%- set s3_public_endpoint = _s3.public_endpoint if s3_external else 'https://' + goat_host %}
+{%- set s3_public_endpoint = goat_public_url %}
 {%- set s3_region = _s3.region %}
 {%- set s3_force_path_style = _s3.force_path_style %}
 {%- set s3_force_path_style_str = 'true' if s3_force_path_style else 'false' %}
@@ -51,6 +68,11 @@
     ssl-redirect) so we do not clutter the ingress spec with dead keys. #}
 {%- set ingress_profile = goat_addon.ingress.profiles[inv_k8s.ingress_class] %}
 {%- set is_nginx = inv_k8s.ingress_class == 'nginx' %}
+{#- ssl-redirect is gated on inv_k8s.ingress.http, matching civitas-core's
+    convention: clusters that terminate TLS at the ingress set http=false
+    (redirect enabled); clusters where a fronting proxy already terminates
+    TLS set http=true (skip the redirect to avoid a loop). #}
+{%- set ssl_redirect = 'false' if (inv_k8s.ingress.http | default(false)) else 'true' %}
 
 global:
   # inv_k8s.storage_class is a DICT in civitas-core ({loc, rwo, rwx}); the
@@ -88,24 +110,30 @@ core:
   {{ img('core') }}
   # goat-web's bundle calls the core API from the browser directly
   # (NEXT_PUBLIC_API_URL is baked in), so core must be reachable externally.
-  # Mounted at /core under goat_host; API_V2_STR below carries the prefix so
-  # no controller needs to rewrite. goat-core emits no absolute URLs.
+  # Mounted at /core under the ingress host; API_V2_STR below carries the
+  # prefix so no controller needs to rewrite. goat-core emits no absolute
+  # URLs. cert-manager.io/cluster-issuer is intentionally NOT set here —
+  # tasks/06_certificate.yml owns the Certificate resource; leaving the
+  # annotation on made five reconcilers race for one object. tls: stays,
+  # ingress-nginx binds the cert to this server block via the tls entry.
+  # `kubernetes.io/ingress.class` is deprecated — spec.ingressClassName
+  # is the canonical control now, and the two silently diverging was a
+  # recurring foot-gun (ingress-nginx 1.x prioritises the annotation).
   ingress:
-    enabled: true
+    enabled: {{ goat_enable_ingress | to_json }}
     className: "{{ inv_k8s.ingress_class }}"
     annotations:
-      cert-manager.io/cluster-issuer: "{{ inv_k8s.cert_manager.issuer_name }}"
-      kubernetes.io/ingress.class: "{{ inv_k8s.ingress_class }}"
-{% if is_nginx %}      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+{% if is_nginx %}      nginx.ingress.kubernetes.io/ssl-redirect: "{{ ssl_redirect }}"
+      nginx.ingress.kubernetes.io/whitelist-source-range: "{{ user_whitelist | default(['0.0.0.0/0']) | join(',') }}"
 {% endif %}    hosts:
-      - host: "{{ goat_host }}"
+      - host: "{{ goat_ingress_host }}"
         paths:
           - path: /core
             pathType: Prefix
     tls:
-      - secretName: "{{ s3_tls_secret_name }}"
+      - secretName: "{{ goat_tls_secret }}"
         hosts:
-          - "{{ goat_host }}"
+          - "{{ goat_ingress_host }}"
   # AUTH=false: goat-core serves all data as the single default identity
   # (seeded by the chart's migrate hook); goat-web's NextAuth still gates
   # UI sign-in through civitas's Keycloak realm. Flipping this to true
@@ -124,7 +152,7 @@ core:
   #     the browser; must be HTTPS so the SPA's fetch isn't mixed-content
   #     blocked. With path-style S3 (S3_FORCE_PATH_STYLE=true, default) the
   #     browser hits `<S3_PUBLIC_ENDPOINT_URL>/<bucket>/…` — for the default
-  #     in-namespace MinIO that's `https://<goat_host>/<bucket>/…` (routed
+  #     in-namespace MinIO that's `<goat_public_url>/<bucket>/…` (routed
   #     via the ingress in 05_minio.yml); for external S3 it's whatever the
   #     provider serves. See goat/apps/core/src/core/services/s3.py.
   config:
@@ -134,7 +162,7 @@ core:
     # every route, so nginx doesn't rewrite. goat-web appends this to
     # NEXT_PUBLIC_API_URL when building URLs.
     API_V2_STR: "/core/api/v2"
-    CLIENT_URL: "https://{{ goat_host }}"
+    CLIENT_URL: "{{ goat_public_url }}"
     S3_PROVIDER: "{{ s3_provider }}"
     S3_ENDPOINT_URL: "{{ s3_internal_endpoint }}"
     S3_PUBLIC_ENDPOINT_URL: "{{ s3_public_endpoint }}"
@@ -196,23 +224,28 @@ geoapi:
     S3_REGION: "{{ s3_region }}"
     S3_BUCKET_NAME: "{{ goat_addon.s3.bucket }}"
   extraEnv:
-    # Python requests/httpx/urllib use these envs to find a CA bundle.
+{% if inv_k8s.ingress.ca_path is defined and inv_k8s.ingress.ca_path != "" %}
+    # Same condition as the `cacert` ConfigMap in tasks/00_namespace.yml —
+    # without `ca_path` the file at /etc/ssl/cacert/cacert.crt does not
+    # exist and Python requests / OpenSSL raise on open. ACME-issued chains
+    # already validate against the OpenSSL default trust store.
     - name: REQUESTS_CA_BUNDLE
-      value: /etc/ssl/civitas/ca.crt
+      value: /etc/ssl/cacert/cacert.crt
     - name: SSL_CERT_FILE
-      value: /etc/ssl/civitas/ca.crt
-    - name: S3_ACCESS_KEY_ID
+      value: /etc/ssl/cacert/cacert.crt
+{% endif %}    - name: S3_ACCESS_KEY_ID
       valueFrom:
         secretKeyRef: { name: goat-s3-credentials, key: access_key }
     - name: S3_SECRET_ACCESS_KEY
       valueFrom:
         secretKeyRef: { name: goat-s3-credentials, key: secret_key }
   extraVolumes:
-    - name: civitas-ca
+{% if inv_k8s.ingress.ca_path is defined and inv_k8s.ingress.ca_path != "" %}
+    - name: cacert
       configMap:
-        name: civitas-ca
+        name: cacert
         optional: true
-    # Shared DuckLake data dir: layer_import (worker-tools) writes parquet
+{% endif %}    # Shared DuckLake data dir: layer_import (worker-tools) writes parquet
     # here, geoapi reads it for tile serving. Both pods must see the same
     # files — hence a single RWX PVC (provisioned by tasks/07_ducklake_pvc.yml
     # via inv_k8s.storage_class.rwx).
@@ -220,10 +253,11 @@ geoapi:
       persistentVolumeClaim:
         claimName: goat-ducklake-data
   extraVolumeMounts:
-    - name: civitas-ca
-      mountPath: /etc/ssl/civitas
+{% if inv_k8s.ingress.ca_path is defined and inv_k8s.ingress.ca_path != "" %}
+    - name: cacert
+      mountPath: /etc/ssl/cacert
       readOnly: true
-    - name: ducklake-data
+{% endif %}    - name: ducklake-data
       mountPath: /app/data
   # geoapi at /geoapi. Path shape + prefix stripping come from the ingress
   # profile — regex `rewrite-target` on nginx, `stripPrefix` Middleware on
@@ -231,23 +265,22 @@ geoapi:
   # prefix), but goat-web never consumes them — it composes every backend
   # URL itself from NEXT_PUBLIC_GEOAPI_URL.
   ingress:
-    enabled: true
+    enabled: {{ goat_enable_ingress | to_json }}
     className: "{{ inv_k8s.ingress_class }}"
     annotations:
-      cert-manager.io/cluster-issuer: "{{ inv_k8s.cert_manager.issuer_name }}"
-      kubernetes.io/ingress.class: "{{ inv_k8s.ingress_class }}"
-{% if is_nginx %}      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+{% if is_nginx %}      nginx.ingress.kubernetes.io/ssl-redirect: "{{ ssl_redirect }}"
+      nginx.ingress.kubernetes.io/whitelist-source-range: "{{ user_whitelist | default(['0.0.0.0/0']) | join(',') }}"
 {% endif %}{% if ingress_profile.needs_middleware %}      traefik.ingress.kubernetes.io/router.middlewares: "{{ goat_addon.namespace }}-goat-strip-geoapi@kubernetescrd"
 {% endif %}{% for k, v in ingress_profile.annotations.items() %}      {{ k }}: "{{ v }}"
 {% endfor %}    hosts:
-      - host: "{{ goat_host }}"
+      - host: "{{ goat_ingress_host }}"
         paths:
           - path: "/geoapi{{ ingress_profile.path_suffix }}"
             pathType: "{{ ingress_profile.pathType }}"
     tls:
-      - secretName: "{{ s3_tls_secret_name }}"
+      - secretName: "{{ goat_tls_secret }}"
         hosts:
-          - "{{ goat_host }}"
+          - "{{ goat_ingress_host }}"
 
 processes:
   enabled: true
@@ -282,11 +315,14 @@ processes:
     # Must match chart's `windmill.bootstrap.workspace` (default `goat`).
     WINDMILL_WORKSPACE: "goat"
   extraEnv:
+{% if inv_k8s.ingress.ca_path is defined and inv_k8s.ingress.ca_path != "" %}
+    # See geoapi note — CA envs are only useful when the `cacert` ConfigMap
+    # is created; ACME-issued chains need no extra bundle.
     - name: REQUESTS_CA_BUNDLE
-      value: /etc/ssl/civitas/ca.crt
+      value: /etc/ssl/cacert/cacert.crt
     - name: SSL_CERT_FILE
-      value: /etc/ssl/civitas/ca.crt
-    - name: S3_ACCESS_KEY_ID
+      value: /etc/ssl/cacert/cacert.crt
+{% endif %}    - name: S3_ACCESS_KEY_ID
       valueFrom:
         secretKeyRef: { name: goat-s3-credentials, key: access_key }
     - name: S3_SECRET_ACCESS_KEY
@@ -298,36 +334,36 @@ processes:
     - name: DUCKLAKE_S3_SECRET_KEY
       valueFrom:
         secretKeyRef: { name: goat-s3-credentials, key: secret_key }
+{% if inv_k8s.ingress.ca_path is defined and inv_k8s.ingress.ca_path != "" %}
   extraVolumes:
-    - name: civitas-ca
+    - name: cacert
       configMap:
-        name: civitas-ca
+        name: cacert
         optional: true
   extraVolumeMounts:
-    - name: civitas-ca
-      mountPath: /etc/ssl/civitas
+    - name: cacert
+      mountPath: /etc/ssl/cacert
       readOnly: true
-  # processes at /processes. Same profile-driven prefix-strip pattern as
+{% endif %}  # processes at /processes. Same profile-driven prefix-strip pattern as
   # geoapi. Same absolute-URL caveat — the UI composes URLs itself from
   # NEXT_PUBLIC_PROCESSES_URL.
   ingress:
-    enabled: true
+    enabled: {{ goat_enable_ingress | to_json }}
     className: "{{ inv_k8s.ingress_class }}"
     annotations:
-      cert-manager.io/cluster-issuer: "{{ inv_k8s.cert_manager.issuer_name }}"
-      kubernetes.io/ingress.class: "{{ inv_k8s.ingress_class }}"
-{% if is_nginx %}      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+{% if is_nginx %}      nginx.ingress.kubernetes.io/ssl-redirect: "{{ ssl_redirect }}"
+      nginx.ingress.kubernetes.io/whitelist-source-range: "{{ user_whitelist | default(['0.0.0.0/0']) | join(',') }}"
 {% endif %}{% if ingress_profile.needs_middleware %}      traefik.ingress.kubernetes.io/router.middlewares: "{{ goat_addon.namespace }}-goat-strip-processes@kubernetescrd"
 {% endif %}{% for k, v in ingress_profile.annotations.items() %}      {{ k }}: "{{ v }}"
 {% endfor %}    hosts:
-      - host: "{{ goat_host }}"
+      - host: "{{ goat_ingress_host }}"
         paths:
           - path: "/processes{{ ingress_profile.path_suffix }}"
             pathType: "{{ ingress_profile.pathType }}"
     tls:
-      - secretName: "{{ s3_tls_secret_name }}"
+      - secretName: "{{ goat_tls_secret }}"
         hosts:
-          - "{{ goat_host }}"
+          - "{{ goat_ingress_host }}"
 
 web:
   enabled: true
@@ -335,17 +371,24 @@ web:
   auth:
     enabled: true
     existingSecret: goat-keycloak-creds
-    publicUrl: "{{ goat_addon.web.public_url }}"
+    publicUrl: "{{ goat_public_url }}"
   # NextAuth runs server-side inside the pod and calls Keycloak over HTTPS.
   # On local/dev with a self-signed CA, Node rejects the cert unless we
-  # point NODE_EXTRA_CA_CERTS at the bundle mounted below.
+  # point NODE_EXTRA_CA_CERTS at the bundle mounted below. Gated on the
+  # same condition as the `cacert` ConfigMap in tasks/00_namespace.yml —
+  # when `inv_k8s.ingress.ca_path` is unset the mount does not exist and
+  # Node otherwise logs `Warning: Ignoring extra certs … No such file` at
+  # every start. ACME-issued chains already validate against the Node
+  # default trust store, so nothing is lost by skipping the mount.
   extraEnv:
+{% if inv_k8s.ingress.ca_path is defined and inv_k8s.ingress.ca_path != "" %}
     - name: NODE_EXTRA_CA_CERTS
-      value: /etc/ssl/civitas/ca.crt
-    # Browser-side: goat-web's SPA calls each backend directly. entrypoint.sh
+      value: /etc/ssl/cacert/cacert.crt
+{% endif %}    # Browser-side: goat-web's SPA calls each backend directly. entrypoint.sh
     # substitutes APP_NEXT_PUBLIC_* placeholders in the bundle at start.
-    # All four URLs share goat_host — the path suffix routes to the right
-    # backend via ingress.
+    # All four URLs are the PUBLIC url (what the browser sees, not the
+    # ingress host) — the path suffix routes to the right backend once the
+    # request reaches the ingress.
     #
     # TRAILING-SLASH ASYMMETRY (do not "normalise", it is load-bearing):
     #
@@ -363,51 +406,69 @@ web:
     #   a trailing `/` (would produce `//` in the callback path and 404).
     #   MUST NOT end in `/`.
     - name: NEXT_PUBLIC_API_URL
-      value: "https://{{ goat_host }}/core/"
+      value: "{{ goat_public_url }}/core/"
     - name: NEXT_PUBLIC_APP_URL
-      value: "https://{{ goat_host }}"
+      value: "{{ goat_public_url }}"
     - name: NEXT_PUBLIC_GEOAPI_URL
-      value: "https://{{ goat_host }}/geoapi"
+      value: "{{ goat_public_url }}/geoapi"
     - name: NEXT_PUBLIC_PROCESSES_URL
-      value: "https://{{ goat_host }}/processes"
+      value: "{{ goat_public_url }}/processes"
+{% if inv_k8s.ingress.ca_path is defined and inv_k8s.ingress.ca_path != "" %}
   extraVolumes:
-    - name: civitas-ca
+    - name: cacert
       configMap:
-        name: civitas-ca
+        name: cacert
         optional: true
   extraVolumeMounts:
-    - name: civitas-ca
-      mountPath: /etc/ssl/civitas
+    - name: cacert
+      mountPath: /etc/ssl/cacert
       readOnly: true
-  # goat-web at the host root. Next.js basePath is build-time (not set in
+{% endif %}  # goat-web at the host root. Next.js basePath is build-time (not set in
   # this image's next.config.js), so serving under a subpath is impossible
   # without a fork — hence web takes /.
   ingress:
-    enabled: true
+    enabled: {{ goat_enable_ingress | to_json }}
     className: "{{ inv_k8s.ingress_class }}"
     annotations:
-      cert-manager.io/cluster-issuer: "{{ inv_k8s.cert_manager.issuer_name }}"
-      kubernetes.io/ingress.class: "{{ inv_k8s.ingress_class }}"
-{% if is_nginx %}      nginx.ingress.kubernetes.io/ssl-redirect: "true"
-{% endif %}    hosts:
-      - host: "{{ goat_host }}"
+{% if is_nginx %}      nginx.ingress.kubernetes.io/ssl-redirect: "{{ ssl_redirect }}"
+      nginx.ingress.kubernetes.io/whitelist-source-range: "{{ user_whitelist | default(['0.0.0.0/0']) | join(',') }}"
+      # NextAuth's /api/auth/callback/keycloak sets a session cookie that
+      # embeds the Keycloak id_token + access_token. With realm roles the
+      # response headers exceed ingress-nginx's 4k default proxy buffer and
+      # nginx returns 502 "upstream sent too big header". The 502 makes the
+      # browser replay the auth code, which then surfaces as a misleading
+      # "invalid_grant (Code not valid)" upstream at Keycloak.
+      nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+      nginx.ingress.kubernetes.io/proxy-buffers-number: "4"
+{% if goat_allow_snippets %}      # X-Forwarded-Host rewrite via configuration-snippet. Only rendered
+      # when `goat_addon.ingress.allow_snippets: true` — the annotation
+      # requires `allow-snippet-annotations: true` in the ingress-nginx
+      # ConfigMap, which upstream defaulted to `false` in 1.9 and which
+      # civitas historically shipped `false` cluster-wide. On clusters
+      # where the flag is off, the Ingress would be rejected by the
+      # controller with a validation error — hence gated.
+      nginx.ingress.kubernetes.io/configuration-snippet: |
+        more_set_headers "X-Forwarded-Host: {{ goat_public_host }}";
+{% endif %}{% endif %}    hosts:
+      - host: "{{ goat_ingress_host }}"
         paths:
           - path: /
             pathType: Prefix
     tls:
-      - secretName: "{{ s3_tls_secret_name }}"
+      - secretName: "{{ goat_tls_secret }}"
         hosts:
-          - "{{ goat_host }}"
+          - "{{ goat_ingress_host }}"
     # KNOWN GOTCHA: Next.js serves /_next/static/chunks/*.js with
     # `cache-control: immutable`. entrypoint.sh sed-substitutes NEXT_PUBLIC_*
     # placeholders at pod start, mutating bytes WITHOUT changing chunk
     # filenames — so browsers that loaded the page before the substitution
     # was complete (or any future NEXT_PUBLIC_* config change) will keep
-    # serving stale pre-substitution bytes forever. Civitas's ingress-nginx
-    # has `allow-snippet-annotations: false` cluster-wide, so we cannot
-    # override the Cache-Control header here. Workaround: clear site data
-    # in DevTools after any NEXT_PUBLIC_* change. Long-term fix belongs
-    # upstream in the GOAT image (regenerate chunk hashes post-sed).
+    # serving stale pre-substitution bytes forever. The Cache-Control
+    # override would require another `configuration-snippet` on top of the
+    # X-Forwarded-Host one above; not worth the surface today. Workaround:
+    # clear site data in DevTools after any NEXT_PUBLIC_* change. Long-term
+    # fix belongs upstream in the GOAT image (regenerate chunk hashes
+    # post-sed).
 
 postgresql:
   operator:
