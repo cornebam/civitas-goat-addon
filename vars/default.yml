@@ -155,14 +155,60 @@ goat_addon:
       # real GPKG immediately. 5g matches the historical hardcoded value
       # on the s3.goat.<DOMAIN>-ingress on main.
       max_body_size: "{{ inv_addons.goat.s3.proxy.max_body_size | default('5g') }}"
-      # nginx-only: verify the upstream TLS certificate. `false` (default)
-      # emits `proxy-ssl-verify: off` on the Ingress — operator-run S3
-      # endpoints typically present a certificate signed by an internal
-      # CA that ingress-nginx's pod truststore does not know. Flip to
-      # `true` when the endpoint is publicly rooted (AWS S3, Cloudflare
-      # R2, …) so ingress-nginx enforces PKI validation. Only consulted
-      # when `s3.endpoint` is `https://`.
+      # Buffer the request body on the ingress pod before proxying it to
+      # the upstream. Default `on` — with `off`, nginx streams the body
+      # as it arrives; if the S3 upstream rejects the request early (4xx
+      # on a bad signature, exceeded quota, missing bucket, …) and
+      # closes without draining the body, the TCP RST from that close
+      # propagates back through nginx as a 502 and the real 4xx status
+      # is lost. The symptom is non-deterministic: whether the browser
+      # sees the actual S3 error depends on a race between how much of
+      # the body already reached the upstream and how quickly the
+      # upstream closed — same signed URL, same file, one attempt shows
+      # 403 and the next shows 502. Only flip to `off` when very large
+      # uploads make disk buffering on the ingress pod untenable and
+      # the diagnostic downside is a conscious trade-off.
+      request_buffering: "{{ inv_addons.goat.s3.proxy.request_buffering | default('on') }}"
+      # nginx-only: verify the upstream TLS certificate.
+      # NOTE: with the addon's default configuration this annotation is a
+      # no-op. ingress-nginx's template only renders `proxy_ssl_verify`
+      # when `ProxySSL.CAFileName` is non-empty, and that is populated
+      # from the `proxy-ssl-secret` annotation (a client-CA Secret) which
+      # the addon does not provision. Kept as a plumbing hook for future
+      # setups that wire in a `proxy-ssl-secret`. Defaults to `false`
+      # (no verify) so the intent stays consistent with the internal-CA
+      # / self-signed endpoints operator-run clusters ship with. Only
+      # consulted when `s3.endpoint` is `https://`.
       ssl_verify: "{{ inv_addons.goat.s3.proxy.ssl_verify | default(false) | bool }}"
+      # SNI hostname sent by ingress-nginx to the upstream during the
+      # TLS handshake. Default (empty) → 05_minio.yml derives it from
+      # `s3.endpoint`'s hostname. ingress-nginx's built-in default is
+      # `$proxy_host`, which under its dynamic-upstream architecture is
+      # the literal string `upstream_balancer` — no S3 endpoint serves
+      # a cert for that name, so name-based-virtual-hosted endpoints
+      # (R2, CDN-fronted MinIO, some managed S3) refuse the handshake.
+      # Only consulted when `s3.endpoint` is `https://`.
+      ssl_name: "{{ inv_addons.goat.s3.proxy.ssl_name | default('') }}"
+      # `Host` header sent to the upstream on the /<bucket> Ingress:
+      #   * unset (Ansible None)  → 05_minio.yml substitutes
+      #     `goat_public_host` (browser-facing name; SigV4 signs this
+      #     host on presigned GETs, so pods must see the same value)
+      #   * "" (empty string)     → the upstream-vhost annotation is
+      #     omitted entirely and ingress-nginx forwards the Host header
+      #     the client sent verbatim (pass-through)
+      #   * any other string      → literal upstream-vhost value
+      # The three-state semantics allow overriding to a custom host or
+      # opting out of the rewrite altogether without deleting the vars
+      # entry.
+      upstream_vhost: "{{ inv_addons.goat.s3.proxy.upstream_vhost | default(None) }}"
+      # Retry a failing upstream request against the next endpoint in the
+      # backend on the listed failure classes. `non_idempotent` is
+      # load-bearing here — without it, ingress-nginx will NOT retry a
+      # POST (or PUT) that arrived on a stale keepalive connection to the
+      # upstream, so a browser upload lands on a half-closed socket and
+      # returns 502 instead of retrying against a fresh connection.
+      next_upstream: "{{ inv_addons.goat.s3.proxy.next_upstream | default('error timeout non_idempotent') }}"
+      next_upstream_tries: "{{ inv_addons.goat.s3.proxy.next_upstream_tries | default('2') }}"
   ducklake:
     pvc_size: "{{ inv_addons.goat.ducklake.pvc_size | default('20Gi') }}"
     # RWX for real multi-node clusters; local-path (k3d/k3s default) cannot

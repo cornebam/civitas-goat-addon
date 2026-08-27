@@ -107,9 +107,17 @@
 # `"{{ var }}"` references — so we materialise the int here and reference
 # it as a bare var at both use sites (ExternalName Service + MinIO
 # Ingress backend).
+#
+# Fallback ladder when the operator's `endpoint` omits an explicit port:
+#   * in_cluster mode          → 9000 (the MinIO Service port)
+#   * external `https://…`     → 443
+#   * external `http://…`      → 80
+# Historically we defaulted to 9000 in every external branch too, which
+# broke every operator-run endpoint that terminates TLS on the standard
+# port and returned `Connection refused` from ingress-nginx.
 - name: "GOAT addon: resolve S3 upstream port"
   ansible.builtin.set_fact:
-    goat_s3_upstream_port: "{{ 9000 if goat_addon.s3.mode == 'in_cluster' else ((goat_addon.s3.endpoint | urlsplit('port')) | default(9000, true) | int) }}"
+    goat_s3_upstream_port: "{{ 9000 if goat_addon.s3.mode == 'in_cluster' else ((goat_addon.s3.endpoint | urlsplit('port')) | default((443 if goat_addon.s3.endpoint.startswith('https://') else 80), true) | int) }}"
 
 # Whether the S3 upstream speaks TLS. Two callers:
 #   * the MinIO Ingress annotations below (nginx `backend-protocol`,
@@ -289,6 +297,28 @@
     goat_tls_secret: "{{ (goat_addon.web.subdomain | default('goat')) + '.' + (INGRESS_DOMAIN | default(DOMAIN)) }}-tls"
     s3_ingress_path: "/{{ goat_addon.s3.bucket }}"
 
+# Resolve the two proxy tunables whose "default" is derived from a
+# neighbouring fact (goat_public_host / the endpoint hostname) — a
+# derivation that can't live in vars/default.yml because those facts
+# only exist after the set_fact block above.
+#
+#   * minio_ingress_upstream_vhost — three-state per README:
+#       None            → goat_public_host (the addon default)
+#       ""              → sentinel meaning "omit the annotation" so
+#                         ingress-nginx forwards the browser's Host
+#                         header verbatim
+#       any other value → literal override
+#     Compared against '' in the annotation-combine below to drive
+#     inclusion of the `upstream-vhost` annotation.
+#
+#   * minio_ingress_ssl_name — SNI for the upstream TLS handshake.
+#     Defaults to the endpoint hostname; only meaningful when the
+#     upstream is HTTPS.
+- name: "GOAT addon: resolve MinIO Ingress proxy vhost + SNI"
+  ansible.builtin.set_fact:
+    minio_ingress_upstream_vhost: "{{ goat_public_host if (goat_addon.s3.proxy.upstream_vhost is none) else goat_addon.s3.proxy.upstream_vhost }}"
+    minio_ingress_ssl_name: "{{ goat_addon.s3.proxy.ssl_name if (goat_addon.s3.proxy.ssl_name | length > 0) else (goat_addon.s3.endpoint | urlsplit('hostname') | default('', true)) }}"
+
 # External-mode only: proxy target for the `/<bucket>` Ingress below.
 # Ingress backends must live in the same namespace; the external S3 is
 # reachable from inside the cluster (operator-side network) but not
@@ -339,6 +369,12 @@
         ports:
           - name: api
             port: {{ goat_s3_upstream_port }}
+            # Explicit targetPort: don't rely on the API server defaulting
+            # targetPort=port. Some ingress controllers and downstream
+            # tools inspect the port spec directly and treat an unset
+            # targetPort as 0, which shows up as `Connection refused`
+            # against a healthy upstream.
+            targetPort: {{ goat_s3_upstream_port }}
 
 # nginx: default request body limit is 1 MB and default read/send timeouts
 # are 60s — both break dataset uploads to MinIO, hence the annotations
@@ -362,13 +398,31 @@
 # (thumbnail loads, downloads) return `SignatureDoesNotMatch`. POST
 # policies are unaffected — the browser upload happens to work — but
 # every read fails. Set to the browser-facing host so signatures
-# validate end-to-end.
+# validate end-to-end. Empty `minio_ingress_upstream_vhost` (operator
+# opted out via `inv_addons.goat.s3.proxy.upstream_vhost: ""`) omits
+# the annotation entirely so the Host header passes through.
+#
+# `proxy-ssl-name` + `proxy-ssl-server-name`: SNI on the upstream TLS
+# handshake. ingress-nginx's built-in default for `proxy_ssl_name` is
+# `$proxy_host` — under the dynamic-upstream architecture that variable
+# is the literal string `upstream_balancer`, which no S3 endpoint
+# presents a cert for. Name-based-virtual-hosted endpoints (R2, most
+# CDN-fronted MinIO deployments) will refuse the handshake with
+# `SSL: unknown protocol` at that point. Set the SNI explicitly to the
+# endpoint hostname so the endpoint can serve the right cert.
+#
+# `proxy-next-upstream` + `-tries`: retry a POST/PUT that arrived on a
+# stale keepalive connection. Without `non_idempotent` in the list,
+# ingress-nginx will not retry an upload against a fresh upstream
+# connection — the browser sees a 502 that a retry would have avoided.
+# Two tries covers the common "one keepalive slot expired between the
+# controller's pool check and the actual write" race.
 #
 # `set_fact` preserves the dict type only when the whole value is a single
 # `{{ expr }}` — do NOT use `>-` here, that folds to a string.
 - name: "GOAT addon: build MinIO ingress annotations for {{ inv_k8s.ingress_class }}"
   ansible.builtin.set_fact:
-    minio_ingress_annotations: "{{ minio_base_annotations | combine(minio_nginx_annotations if inv_k8s.ingress_class == 'nginx' else {}) | combine(minio_nginx_tls_annotations if (inv_k8s.ingress_class == 'nginx' and (s3_endpoint_is_tls | bool)) else {}) | combine(minio_external_annotations if (inv_k8s.ingress_class == 'nginx' and goat_addon.s3.mode == 'external') else {}) }}"
+    minio_ingress_annotations: "{{ minio_base_annotations | combine(minio_nginx_annotations if inv_k8s.ingress_class == 'nginx' else {}) | combine(minio_nginx_vhost_annotation if (inv_k8s.ingress_class == 'nginx' and minio_ingress_upstream_vhost | length > 0) else {}) | combine(minio_nginx_tls_annotations if (inv_k8s.ingress_class == 'nginx' and (s3_endpoint_is_tls | bool)) else {}) }}"
   vars:
     # `cert-manager.io/cluster-issuer` intentionally omitted — the Certificate
     # is owned by tasks/06_certificate.yml; leaving the annotation on made
@@ -393,25 +447,31 @@
       # PUT is written to disk on the ingress pod before a single byte
       # reaches S3 — the access log shows `a client request body is
       # buffered to a temporary file` and large uploads latency-spike.
-      nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
-      nginx.ingress.kubernetes.io/upstream-vhost: "{{ goat_public_host }}"
+      nginx.ingress.kubernetes.io/proxy-request-buffering: "{{ goat_addon.s3.proxy.request_buffering }}"
+      nginx.ingress.kubernetes.io/proxy-next-upstream: "{{ goat_addon.s3.proxy.next_upstream }}"
+      nginx.ingress.kubernetes.io/proxy-next-upstream-tries: "{{ goat_addon.s3.proxy.next_upstream_tries }}"
       nginx.ingress.kubernetes.io/backend-protocol: "{{ 'HTTPS' if (s3_endpoint_is_tls | bool) else 'HTTP' }}"
+    # Emitted only when `minio_ingress_upstream_vhost` is non-empty.
+    # Split out from `minio_nginx_annotations` so the operator override
+    # `inv_addons.goat.s3.proxy.upstream_vhost: ""` can suppress the
+    # annotation entirely (a set-to-empty annotation would still take
+    # effect and blank the Host header).
+    minio_nginx_vhost_annotation:
+      nginx.ingress.kubernetes.io/upstream-vhost: "{{ minio_ingress_upstream_vhost }}"
     minio_nginx_tls_annotations:
-      # Upstream TLS verification. Off by default because operator-run S3
-      # endpoints typically present an internal-CA certificate that the
-      # ingress-nginx pod does not trust. Flip via
-      # `inv_addons.goat.s3.proxy.ssl_verify: true` when the endpoint's
-      # cert is publicly rooted (real AWS S3, Cloudflare R2, …).
+      # Upstream TLS verification. Default `off`.
+      # NOTE: with the addon's default config this annotation is a no-op.
+      # ingress-nginx's template only renders `proxy_ssl_verify` when
+      # `ProxySSL.CAFileName` is non-empty, which is populated from the
+      # `proxy-ssl-secret` annotation (client-CA Secret). The addon does
+      # not provision `proxy-ssl-secret`, so the underlying nginx
+      # directive is never emitted. Kept for forward compatibility when
+      # a CA secret is wired in — flip to `true` via
+      # `inv_addons.goat.s3.proxy.ssl_verify: true` at that point.
       nginx.ingress.kubernetes.io/proxy-ssl-verify: "{{ 'on' if (goat_addon.s3.proxy.ssl_verify | bool) else 'off' }}"
-    minio_external_annotations:
-      # ingress-nginx resolves ExternalName Service endpoints only at
-      # config reload by default — a value change in the Service
-      # (`externalName:`) does not propagate. `service-upstream: "true"`
-      # switches the upstream to reference the Service ClusterIP, so
-      # ingress-nginx re-resolves the ExternalName on every request via
-      # in-cluster DNS. Required on any release that still ships the
-      # old resolver behaviour.
-      nginx.ingress.kubernetes.io/service-upstream: "true"
+      # Explicit SNI. See comment above the set_fact for the "why".
+      nginx.ingress.kubernetes.io/proxy-ssl-name: "{{ minio_ingress_ssl_name }}"
+      nginx.ingress.kubernetes.io/proxy-ssl-server-name: "on"
 
 - name: "GOAT addon: assert S3 ingress path matches bucket name"
   ansible.builtin.assert:
