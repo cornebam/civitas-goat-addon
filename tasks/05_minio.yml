@@ -111,6 +111,17 @@
   ansible.builtin.set_fact:
     goat_s3_upstream_port: "{{ 9000 if goat_addon.s3.mode == 'in_cluster' else ((goat_addon.s3.endpoint | urlsplit('port')) | default(9000, true) | int) }}"
 
+# Whether the S3 upstream speaks TLS. Two callers:
+#   * the MinIO Ingress annotations below (nginx `backend-protocol`,
+#     `proxy-ssl-verify`; traefik `service.serversscheme`)
+#   * the DuckLake / bucket-init Jobs' `S3_USE_SSL` env var
+# In `in_cluster` mode the endpoint is always the http:// in-namespace
+# Service, so this evaluates to false. In `external` mode it reflects the
+# scheme of the operator-supplied endpoint.
+- name: "GOAT addon: determine whether S3 upstream uses TLS"
+  ansible.builtin.set_fact:
+    s3_endpoint_is_tls: "{{ goat_addon.s3.mode == 'external' and goat_addon.s3.endpoint.startswith('https://') }}"
+
 # In-cluster mode reuses credentials across reruns if a prior run left a
 # Secret behind — the k8s_info lookup below feeds the reuse branch.
 - name: "GOAT addon: check for existing goat-s3-credentials secret"
@@ -263,11 +274,18 @@
 #   * goat_public_url — what the browser sees. Substituted into
 #     S3_PUBLIC_ENDPOINT_URL (rendered in the chart values); presigned URLs
 #     the browser follows point at this URL.
+#   * goat_public_host — the bare host derived from `goat_public_url`
+#     (no scheme, no trailing slash). Used as `upstream-vhost` on the
+#     MinIO Ingress so the pod sees `Host: <public host>` — SigV4 signs
+#     the host on presigned GETs and would otherwise fail with
+#     `SignatureDoesNotMatch` when a fronting reverse proxy rewrites the
+#     Host header to the internal ingress name.
 - name: "GOAT addon: derive goat ingress + public + S3 ingress path from inventory"
   ansible.builtin.set_fact:
     goat_subdomain: "{{ goat_addon.web.subdomain | default('goat') }}"
     goat_ingress_host: "{{ (goat_addon.web.subdomain | default('goat')) + '.' + (INGRESS_DOMAIN | default(DOMAIN)) }}"
     goat_public_url: "{{ goat_addon.web.public_url | default('https://' + (goat_addon.web.subdomain | default('goat')) + '.' + DOMAIN) }}"
+    goat_public_host: "{{ (goat_addon.web.public_url | default('https://' + (goat_addon.web.subdomain | default('goat')) + '.' + DOMAIN)) | regex_replace('^https?://', '') | regex_replace('/+$', '') }}"
     goat_tls_secret: "{{ (goat_addon.web.subdomain | default('goat')) + '.' + (INGRESS_DOMAIN | default(DOMAIN)) }}-tls"
     s3_ingress_path: "/{{ goat_addon.s3.bucket }}"
 
@@ -302,6 +320,19 @@
           app.kubernetes.io/name: goat
           app.kubernetes.io/part-of: goat
           app.kubernetes.io/managed-by: civitas-goat-addon
+      {% if inv_k8s.ingress_class == 'traefik' and (s3_endpoint_is_tls | bool) %}
+        annotations:
+          # Traefik has no Ingress-level backend-protocol annotation; the
+          # upstream scheme is a per-Service concern. Without this,
+          # Traefik dials the HTTPS S3 endpoint as HTTP and the TLS
+          # listener drops the connection mid-request (same failure mode
+          # as ingress-nginx without `backend-protocol: HTTPS`).
+          # Internal-CA endpoints additionally need a ServersTransport
+          # CRD to skip verification — out of scope for this addon;
+          # operators point at a publicly-rooted endpoint or provision
+          # the transport themselves.
+          traefik.ingress.kubernetes.io/service.serversscheme: https
+      {% endif %}
       spec:
         type: ExternalName
         externalName: {{ goat_addon.s3.endpoint | urlsplit('hostname') }}
@@ -310,17 +341,34 @@
             port: {{ goat_s3_upstream_port }}
 
 # nginx: default request body limit is 1 MB and default read/send timeouts
-# are 60s — both break dataset uploads to MinIO, hence the four annotations
+# are 60s — both break dataset uploads to MinIO, hence the annotations
 # below. Traefik has no default request body size limit and higher default
 # timeouts, so the nginx-only annotations are conditional. HTTPS redirect
 # on Traefik is expected to be configured at the entrypoint (or via a
 # redirectScheme middleware) — see README.
 #
+# Backend protocol: ingress-nginx defaults to HTTP with the upstream. When
+# `goat_addon.s3.endpoint` is `https://…`, plaintext HTTP to an S3 TLS
+# listener triggers an immediate connection reset once the request body
+# starts flowing (`writev() failed (104: Connection reset by peer) while
+# sending request to upstream`) — visible to the browser as 502. The
+# `backend-protocol` annotation switches the upstream leg to HTTPS; the
+# derivation via `s3_endpoint_is_tls` covers both modes (in_cluster ==
+# HTTP, external == whatever scheme the operator supplied).
+#
+# `upstream-vhost`: SigV4 signs the request host. The fronting reverse
+# proxy of an operator-run cluster typically rewrites the Host header to
+# the internal ingress name; without this annotation, presigned GETs
+# (thumbnail loads, downloads) return `SignatureDoesNotMatch`. POST
+# policies are unaffected — the browser upload happens to work — but
+# every read fails. Set to the browser-facing host so signatures
+# validate end-to-end.
+#
 # `set_fact` preserves the dict type only when the whole value is a single
 # `{{ expr }}` — do NOT use `>-` here, that folds to a string.
 - name: "GOAT addon: build MinIO ingress annotations for {{ inv_k8s.ingress_class }}"
   ansible.builtin.set_fact:
-    minio_ingress_annotations: "{{ minio_base_annotations | combine(minio_nginx_annotations if inv_k8s.ingress_class == 'nginx' else {}) | combine(minio_external_annotations if (inv_k8s.ingress_class == 'nginx' and goat_addon.s3.mode == 'external') else {}) }}"
+    minio_ingress_annotations: "{{ minio_base_annotations | combine(minio_nginx_annotations if inv_k8s.ingress_class == 'nginx' else {}) | combine(minio_nginx_tls_annotations if (inv_k8s.ingress_class == 'nginx' and (s3_endpoint_is_tls | bool)) else {}) | combine(minio_external_annotations if (inv_k8s.ingress_class == 'nginx' and goat_addon.s3.mode == 'external') else {}) }}"
   vars:
     # `cert-manager.io/cluster-issuer` intentionally omitted — the Certificate
     # is owned by tasks/06_certificate.yml; leaving the annotation on made
@@ -337,9 +385,24 @@
       # a loop (http=true).
       nginx.ingress.kubernetes.io/ssl-redirect: "{{ 'false' if (inv_k8s.ingress.http | default(false)) else 'true' }}"
       nginx.ingress.kubernetes.io/whitelist-source-range: "{{ user_whitelist | default(['0.0.0.0/0']) | join(',') }}"
-      nginx.ingress.kubernetes.io/proxy-body-size: "5g"
+      nginx.ingress.kubernetes.io/proxy-body-size: "{{ goat_addon.s3.proxy.max_body_size }}"
       nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
       nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+      # Uploads: stream the request body to the upstream instead of
+      # buffering it to /tmp/nginx/client-body/ first. Without this, every
+      # PUT is written to disk on the ingress pod before a single byte
+      # reaches S3 — the access log shows `a client request body is
+      # buffered to a temporary file` and large uploads latency-spike.
+      nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+      nginx.ingress.kubernetes.io/upstream-vhost: "{{ goat_public_host }}"
+      nginx.ingress.kubernetes.io/backend-protocol: "{{ 'HTTPS' if (s3_endpoint_is_tls | bool) else 'HTTP' }}"
+    minio_nginx_tls_annotations:
+      # Upstream TLS verification. Off by default because operator-run S3
+      # endpoints typically present an internal-CA certificate that the
+      # ingress-nginx pod does not trust. Flip via
+      # `inv_addons.goat.s3.proxy.ssl_verify: true` when the endpoint's
+      # cert is publicly rooted (real AWS S3, Cloudflare R2, …).
+      nginx.ingress.kubernetes.io/proxy-ssl-verify: "{{ 'on' if (goat_addon.s3.proxy.ssl_verify | bool) else 'off' }}"
     minio_external_annotations:
       # ingress-nginx resolves ExternalName Service endpoints only at
       # config reload by default — a value change in the Service
@@ -454,11 +517,7 @@
           if goat_addon.s3.mode == 'external'
           else 'http://minio.' + goat_addon.namespace + '.svc.cluster.local:9000')
          | trim | regex_replace('/+$', '') | regex_replace('^https?://', '') }}
-    s3_job_use_ssl: >-
-      {{ ('true'
-          if (goat_addon.s3.mode == 'external'
-              and goat_addon.s3.endpoint.startswith('https://'))
-          else 'false') | trim }}
+    s3_job_use_ssl: "{{ 'true' if (s3_endpoint_is_tls | bool) else 'false' }}"
     s3_job_url_style: >-
       {{ ('vhost'
           if (goat_addon.s3.mode == 'external'
@@ -617,7 +676,7 @@
           con.execute(f"SET s3_use_ssl = {'true' if use_ssl else 'false'};")
 
           pg_uri = (
-              f"host={os.environ['PG_HOST']} port=5432 "
+              f"host={os.environ['PG_HOST']} port={os.environ.get('PG_PORT', '5432')} "
               f"user={os.environ['PG_USER']} password={os.environ['PG_PASS']} "
               f"dbname={os.environ['PG_DB']} "
               f"keepalives=1 keepalives_idle=30 keepalives_interval=5 "
@@ -694,7 +753,9 @@
                 imagePullPolicy: "{{ software.addon_goat.images.processes.pullPolicy | default('IfNotPresent') }}"
                 env:
                   - name: PG_HOST
-                    value: "{{ goat_addon.db.central_db_name }}.{{ goat_addon.db.central_db_ns }}.svc.cluster.local"
+                    value: "{{ goat_addon.db.host }}"
+                  - name: PG_PORT
+                    value: "{{ goat_addon.db.port }}"
                   - name: PG_USER
                     valueFrom:
                       secretKeyRef: { name: goat-postgres-creds, key: username }

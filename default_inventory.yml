@@ -28,6 +28,27 @@ inv_addons:
       # still collide on those roles.
       goat_db_name: "goat"
       windmill_db_name: "windmill"
+      # Runtime Postgres endpoint. Defaults to the Zalando master service
+      # (`central-db.<ns>.svc.cluster.local:5432`). Override to route
+      # goat-core / geoapi / processes / windmill / DuckLake bootstrap
+      # through the operator's pgbouncer connection pooler instead —
+      # matches what the geoserver and hasura addons in civitas-core do.
+      # Database provisioning is UNAFFECTED: tasks/01_db.yml patches the
+      # Zalando cluster CR by `central_db_name`, reads the operator's
+      # `<db>-owner-user.<cluster>.credentials.postgresql.acid.zalan.do`
+      # Secrets, and runs `psql` via `k8s_exec` inside the master pod —
+      # never touches `host`/`port`.
+      # host: "central-db-pooler.{{ inv_central_db.ns_name }}.svc.cluster.local"
+      # port: 5432
+      # Windmill-only escape hatch, defaults to `host`/`port`. The
+      # operator's pooler runs pgbouncer in TRANSACTION mode; windmill
+      # talks to Postgres through sqlx with server-side prepared
+      # statements, which only work in transaction pooling on
+      # pgbouncer >= 1.21 with `max_prepared_statements` non-zero. Pin
+      # back to the direct service if windmill misbehaves while the rest
+      # of the stack stays pooled.
+      # windmill_host: "central-db.{{ inv_central_db.ns_name }}.svc.cluster.local"
+      # windmill_port: 5432
     keycloak:
       # The OIDC client ID to create in the civitas Keycloak realm.
       # The realm itself is read from inv_access.tenant.realm_name.

@@ -2,6 +2,15 @@
 ---
 addon_dir: "addons/goat_addon/"
 
+# Composed once at the top level, deliberately OUTSIDE `goat_addon`. If
+# `goat_addon.db.host`'s default composed this FQDN inline from
+# `goat_addon.db.central_db_name`, Ansible would resolve one key of
+# `goat_addon` while templating a sibling key of `goat_addon` and raise
+# `recursive loop detected in template string` — the sibling `minio_addon`
+# has already been bitten by exactly that shape with `inv_op_stack`. Hoisting
+# the FQDN out of `goat_addon` breaks the cycle.
+goat_central_db_fqdn: "{{ (inv_addons.goat.db.central_db_name | default('central-db')) + '.' + inv_central_db.ns_name + '.svc.cluster.local' }}"
+
 goat_addon:
   namespace: "{{ inv_addons.goat.namespace | default(ENVIRONMENT + '-goat-stack') }}"
   # Civitas conventions: every stack declares whether it creates its own
@@ -24,7 +33,34 @@ goat_addon:
     version: "{{ inv_addons.goat.chart.version | default(software.addon_goat.helm_chart_version) }}"
   db:
     central_db_ns: "{{ inv_central_db.ns_name }}"
-    central_db_name: "central-db"
+    # Zalando cluster NAME — not an endpoint. `tasks/01_db.yml` derives the
+    # operator's per-DB credential Secret names from this
+    # (`<db>-owner-user.<cluster>.credentials.postgresql.acid.zalan.do`) and
+    # runs its `psql` provisioning calls via `k8s_exec` inside the master
+    # pod. It must therefore stay the Zalando cluster name even when
+    # workloads are pointed at a pooler.
+    central_db_name: "{{ inv_addons.goat.db.central_db_name | default('central-db') }}"
+    # Postgres endpoint that the *workloads* dial (goat-core, geoapi,
+    # processes, windmill workers, DuckLake bootstrap). Deliberately
+    # separate from `central_db_name`: the default resolves to the Zalando
+    # master service, but overriding to
+    # `central-db-pooler.<ns>.svc.cluster.local` routes runtime traffic
+    # through the operator's pgbouncer instead. Database provisioning is
+    # unaffected — `01_db.yml` never reads `host`/`port`.
+    host: "{{ inv_addons.goat.db.host | default(goat_central_db_fqdn) }}"
+    port: "{{ inv_addons.goat.db.port | default(5432) | int }}"
+    # Windmill-only escape hatch, defaults to `host`/`port`. The Zalando
+    # operator's pooler runs pgbouncer in TRANSACTION mode by default;
+    # windmill talks to Postgres through sqlx with server-side prepared
+    # statements plus its own migrations, and prepared statements only work
+    # under transaction pooling on pgbouncer >= 1.21 with
+    # `max_prepared_statements` set non-zero. Leave unset to follow `host`;
+    # pin back to the direct service if windmill misbehaves while the rest
+    # of the stack stays pooled. Nested `default()` on purpose — chaining
+    # `| default | default` would silently pick the wrong fallback when
+    # `host` is set but `windmill_host` is not.
+    windmill_host: "{{ inv_addons.goat.db.windmill_host | default(inv_addons.goat.db.host | default(goat_central_db_fqdn)) }}"
+    windmill_port: "{{ inv_addons.goat.db.windmill_port | default(inv_addons.goat.db.port | default(5432)) | int }}"
     # DB names. Defaults match upstream compose / chart conventions. Vary if
     # you need to co-tenant two installs in the same Postgres cluster — but
     # note windmill's *role names* (windmill_admin, windmill_user) are
@@ -110,6 +146,23 @@ goat_addon:
     # path-style since 2020 and buckets created after that in some regions
     # require virtual-hosted-style — set false.
     force_path_style: "{{ inv_addons.goat.s3.force_path_style | default(true) | bool }}"
+    # Tunables for the `/<bucket>` passthrough Ingress (05_minio.yml).
+    # Applied in both `in_cluster` and `external` modes so the browser
+    # can PUT presigned objects at `<goat_public_url>/<bucket>/…` without
+    # hitting the default 1 MB body limit or default 60s upstream timeouts.
+    proxy:
+      # Upload size cap. ingress-nginx default is 1 MB, which 413s every
+      # real GPKG immediately. 5g matches the historical hardcoded value
+      # on the s3.goat.<DOMAIN>-ingress on main.
+      max_body_size: "{{ inv_addons.goat.s3.proxy.max_body_size | default('5g') }}"
+      # nginx-only: verify the upstream TLS certificate. `false` (default)
+      # emits `proxy-ssl-verify: off` on the Ingress — operator-run S3
+      # endpoints typically present a certificate signed by an internal
+      # CA that ingress-nginx's pod truststore does not know. Flip to
+      # `true` when the endpoint is publicly rooted (AWS S3, Cloudflare
+      # R2, …) so ingress-nginx enforces PKI validation. Only consulted
+      # when `s3.endpoint` is `https://`.
+      ssl_verify: "{{ inv_addons.goat.s3.proxy.ssl_verify | default(false) | bool }}"
   ducklake:
     pvc_size: "{{ inv_addons.goat.ducklake.pvc_size | default('20Gi') }}"
     # RWX for real multi-node clusters; local-path (k3d/k3s default) cannot

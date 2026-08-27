@@ -97,7 +97,7 @@
     api_version: v1
     kind: Secret
     namespace: "{{ goat_addon.db.central_db_ns }}"
-    name: "{{ goat_addon.db.goat_db_name }}-owner-user.{{ goat_addon.db.central_db_name }}.credentials.postgresql.acid.zalan.do"
+    name: "{{ goat_addon.db.goat_db_name }}-owner-user.central-db.credentials.postgresql.acid.zalan.do"
   register: goat_db_secret
   retries: 30
   delay: 5
@@ -110,7 +110,7 @@
     api_version: v1
     kind: Secret
     namespace: "{{ goat_addon.db.central_db_ns }}"
-    name: "{{ goat_addon.db.windmill_db_name }}-owner-user.{{ goat_addon.db.central_db_name }}.credentials.postgresql.acid.zalan.do"
+    name: "{{ goat_addon.db.windmill_db_name }}-owner-user.central-db.credentials.postgresql.acid.zalan.do"
   register: windmill_db_secret
   retries: 30
   delay: 5
