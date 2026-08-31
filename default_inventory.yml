@@ -49,6 +49,21 @@ inv_addons:
       # of the stack stays pooled.
       # windmill_host: "central-db.{{ inv_central_db.ns_name }}.svc.cluster.local"
       # windmill_port: 5432
+      # Geoapi-only escape hatch, defaults to `host`/`port`. geoapi's
+      # `_create_pool` (apps/geoapi/.../services/layer_service.py) hardcodes
+      # `server_settings={"tcp_keepalives_idle": ..., ...}` on
+      # asyncpg.create_pool; asyncpg forwards those as Postgres startup
+      # parameters and pgbouncer rejects any startup parameter outside its
+      # (Zalando-image-hardcoded) `ignore_startup_parameters` list — geoapi
+      # then dies at startup with `ProtocolViolationError: unsupported
+      # startup parameter: tcp_keepalives_idle`. There is no env var to
+      # disable the dict, so the only workaround is to point geoapi at the
+      # direct Zalando service until the setting becomes configurable
+      # upstream. Bypassing the pooler costs up to 10 direct connections
+      # per geoapi replica (asyncpg pool is min_size=2, max_size=10,
+      # likewise hardcoded); keep replicaCount low if you rely on this.
+      # geoapi_host: "central-db.{{ inv_central_db.ns_name }}.svc.cluster.local"
+      # geoapi_port: 5432
     keycloak:
       # The OIDC client ID to create in the civitas Keycloak realm.
       # The realm itself is read from inv_access.tenant.realm_name.

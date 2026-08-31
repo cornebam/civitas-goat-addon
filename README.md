@@ -94,6 +94,30 @@ inv_addons:
       # windmill_user) are hardcoded by its migrations regardless.
       goat_db_name: "goat"
       windmill_db_name: "windmill"
+      # Optional — runtime Postgres endpoint that the workloads dial.
+      # Defaults to the Zalando master service; set to the operator's
+      # pgbouncer to pool the whole stack. DB provisioning is unaffected
+      # (01_db.yml drives Zalando by cluster name, not endpoint).
+      # host: "central-db-pooler.{{ inv_central_db.ns_name }}.svc.cluster.local"
+      # port: 5432
+      # Per-service escape hatches, defaults to `host`/`port`. Use to keep
+      # the rest of the stack pooled while pinning a single service back
+      # to the direct Zalando service:
+      #   * windmill_host — pgbouncer TRANSACTION mode does not support
+      #     sqlx's server-side prepared statements without
+      #     `max_prepared_statements` on pgbouncer >= 1.21.
+      #   * geoapi_host  — geoapi's `_create_pool` passes hardcoded
+      #     `tcp_keepalives_*` `server_settings` to asyncpg, which sends
+      #     them as Postgres startup parameters; pgbouncer rejects any
+      #     startup parameter outside its (Zalando-image-hardcoded)
+      #     `ignore_startup_parameters` list and geoapi dies with
+      #     `ProtocolViolationError`. Bypassing the pooler costs up to 10
+      #     direct connections per replica (asyncpg pool is hardcoded
+      #     `min_size=2, max_size=10`); keep `geoapi.replicaCount` low.
+      # windmill_host: "central-db.{{ inv_central_db.ns_name }}.svc.cluster.local"
+      # windmill_port: 5432
+      # geoapi_host: "central-db.{{ inv_central_db.ns_name }}.svc.cluster.local"
+      # geoapi_port: 5432
     keycloak:
       client_id: "goat-web"
     ingress:

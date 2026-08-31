@@ -442,6 +442,12 @@
       nginx.ingress.kubernetes.io/proxy-body-size: "{{ goat_addon.s3.proxy.max_body_size }}"
       nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
       nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+      # ExternalName Services have no ClusterIP. When `service-upstream`
+      # is enabled cluster-wide, ingress-nginx calls
+      # getServiceClusterEndpoint() for this backend and hard-fails with
+      # "no ClusterIP found", 502-ing every browser upload. Pin it off
+      # here rather than relying on the cluster default.
+      nginx.ingress.kubernetes.io/service-upstream: "false"
       # Uploads: stream the request body to the upstream instead of
       # buffering it to /tmp/nginx/client-body/ first. Without this, every
       # PUT is written to disk on the ingress pod before a single byte

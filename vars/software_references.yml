@@ -46,15 +46,21 @@ software:
       # templates/goat_values.yml → consumed by the chart's per-service
       # `<svc>.image.{registry,repository,tag,pullPolicy}` blocks.
       core:
-        registry: ghcr.io
-        repository: plan4better/goat/core
-        tag: "{{ goat_release }}"
-        pullPolicy: IfNotPresent
+        # registry: ghcr.io
+        # repository: plan4better/goat/core
+        # tag: "{{ goat_release }}"
+        registry: registry.gitlab.com
+        repository: cornelius.kirchhoff/goat-fix/core
+        tag: "v2.4.58-put.1"
+        pullPolicy: Always
       web:
-        registry: ghcr.io
-        repository: plan4better/goat/web
-        tag: "{{ goat_release }}"
-        pullPolicy: IfNotPresent
+        # registry: ghcr.io
+        # repository: plan4better/goat/web
+        # tag: "{{ goat_release }}"
+        registry: registry.gitlab.com
+        repository: cornelius.kirchhoff/goat-fix/web
+        tag: "v2.4.58-put.1"
+        pullPolicy: Always
       geoapi:
         registry: ghcr.io
         repository: plan4better/goat/geoapi
@@ -82,16 +88,22 @@ software:
       # for many releases. That pin is long past its usefulness — do not
       # reintroduce it reflexively. Track goat_release with everyone else.
       windmill_worker_tools:
-        registry: ghcr.io
-        repository: plan4better/goat/windmill-worker-tools
-        tag: "{{ goat_release }}"
-        pullPolicy: IfNotPresent
+        # registry: ghcr.io
+        # repository: plan4better/goat/windmill-worker-tools
+        # tag: "{{ goat_release }}"
+        registry: registry.gitlab.com
+        repository: cornelius.kirchhoff/goat-fix/windmill-worker-tools
+        tag: "v2.4.58-cache.1"
+        pullPolicy: Always
       # Chromium-based PDF/atlas generation worker.
       windmill_worker_print:
-        registry: ghcr.io
-        repository: plan4better/goat/windmill-worker-print
-        tag: "{{ goat_release }}"
-        pullPolicy: IfNotPresent
+        # registry: ghcr.io
+        # repository: plan4better/goat/windmill-worker-print
+        # tag: "{{ goat_release }}"
+        registry: registry.gitlab.com
+        repository: cornelius.kirchhoff/goat-fix/windmill-worker-print
+        tag: "v2.4.58-cache.1"
+        pullPolicy: Always
 
       # Bundled redis (Bitnami sub-chart). Free Bitnami images moved to
       # bitnamilegacy in Aug 2025 — see chart README for context.

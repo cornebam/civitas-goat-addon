@@ -61,6 +61,29 @@ goat_addon:
     # `host` is set but `windmill_host` is not.
     windmill_host: "{{ inv_addons.goat.db.windmill_host | default(inv_addons.goat.db.host | default(goat_central_db_fqdn)) }}"
     windmill_port: "{{ inv_addons.goat.db.windmill_port | default(inv_addons.goat.db.port | default(5432)) | int }}"
+    # Geoapi-only escape hatch, defaults to `host`/`port`. WORKAROUND:
+    # `apps/geoapi/src/geoapi/services/layer_service.py:_create_pool` passes a
+    # hardcoded `server_settings={"tcp_keepalives_idle": ..., "…_interval": ...,
+    # "…_count": ...}` to `asyncpg.create_pool`. asyncpg forwards those as
+    # Postgres startup parameters, and pgbouncer rejects any startup parameter
+    # outside `ignore_startup_parameters` — the Zalando pooler image hardcodes
+    # that list in its config template with no supported override, so geoapi
+    # raises `ProtocolViolationError: unsupported startup parameter:
+    # tcp_keepalives_idle` at startup when routed via the pooler. The dict is
+    # a literal with no config indirection, so no env var can disable it.
+    # Pin `geoapi_host` at the direct Zalando master service
+    # (`central-db.<ns>.svc.cluster.local`) to bypass the pooler for geoapi
+    # only; leave unset to follow `host`. Remove once geoapi makes those
+    # settings configurable or drops them upstream.
+    # COST: bypassing the pooler here costs up to 10 direct connections per
+    # geoapi replica (`asyncpg` pool is `min_size=2, max_size=10`, hardcoded
+    # in the same `_create_pool` call). Keep `geoapi.replicaCount` low when
+    # this override points at the direct service.
+    # Nested `default()` on purpose — chaining `| default | default` would
+    # silently pick the wrong fallback when `host` is set but `geoapi_host`
+    # is not.
+    geoapi_host: "{{ inv_addons.goat.db.geoapi_host | default(inv_addons.goat.db.host | default(goat_central_db_fqdn)) }}"
+    geoapi_port: "{{ inv_addons.goat.db.geoapi_port | default(inv_addons.goat.db.port | default(5432)) | int }}"
     # DB names. Defaults match upstream compose / chart conventions. Vary if
     # you need to co-tenant two installs in the same Postgres cluster — but
     # note windmill's *role names* (windmill_admin, windmill_user) are
