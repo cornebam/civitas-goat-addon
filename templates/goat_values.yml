@@ -496,7 +496,7 @@ windmill:
     config:
       MODE: "server"
       BASE_URL: "http://goat-windmill-server"
-      DATABASE_CONNECTIONS: "10"
+      DATABASE_CONNECTIONS: "5"
     ingress:
       enabled: false
   # Each goatlib-running worker needs the app DB + S3 + DuckLake
@@ -511,6 +511,8 @@ windmill:
         repository: "{{ software.addon_goat.images.windmill_worker_default.repository }}"
         tag: "{{ software.addon_goat.images.windmill_worker_default.tag }}"
         pullPolicy: "{{ software.addon_goat.images.windmill_worker_default.pullPolicy | default('Always') }}"
+      config:
+        DATABASE_CONNECTIONS: "2"
     # `tools` and `workflows` share windmill-worker-tools (heavier;
     # bundles goatlib + geospatial deps).
     tools:
@@ -533,6 +535,7 @@ windmill:
         MODE: "worker"
         WORKER_GROUP: "tools"
         WORKER_TAGS: "tools"
+        DATABASE_CONNECTIONS: "2"
         # DUCKDB_EXTENSION_DIRECTORY whitelisted so job subprocesses
         # find the extensions baked at /opt/duckdb-extensions instead
         # of downloading (blocked on egress-restricted clusters).
@@ -578,6 +581,7 @@ windmill:
         MODE: "worker"
         WORKER_GROUP: "workflows"
         WORKER_TAGS: "workflows"
+        DATABASE_CONNECTIONS: "2"
         WHITELIST_ENVS: "POSTGRES_SERVER,POSTGRES_PORT,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,S3_PROVIDER,S3_FORCE_PATH_STYLE,S3_ENDPOINT_URL,S3_PUBLIC_ENDPOINT_URL,S3_REGION,S3_BUCKET_NAME,S3_ACCESS_KEY_ID,S3_SECRET_ACCESS_KEY,MAX_UPLOAD_DATASET_FILE_SIZE,DUCKLAKE_CATALOG_SCHEMA,DUCKLAKE_DATA_DIR,CUSTOMER_SCHEMA,DUCKDB_EXTENSION_DIRECTORY"
         POSTGRES_SERVER: "{{ goat_addon.db.host }}"
         POSTGRES_PORT: "{{ goat_addon.db.port }}"
@@ -611,6 +615,8 @@ windmill:
         tag: "{{ software.addon_goat.images.windmill_worker_print.tag }}"
         pullPolicy: "{{ software.addon_goat.images.windmill_worker_print.pullPolicy | default('Always') }}"
       nodeSelector: {}
+      config:
+        DATABASE_CONNECTIONS: "2"
 
 caddy:
   enabled: false         # goat-web owns its Ingress
