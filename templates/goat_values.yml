@@ -156,10 +156,8 @@ geoapi:
       configMap:
         name: cacert
         optional: true
-{% endif %}    # Shared DuckLake data dir: layer_import (worker-tools) writes parquet
-    # here, geoapi reads it for tile serving. Both pods must see the same
-    # files — hence a single RWX PVC (provisioned by tasks/07_ducklake_pvc.yml
-    # via inv_k8s.storage_class.rwx).
+{% endif %}    # Shared DuckLake data dir: worker-tools writes parquet, geoapi
+    # reads it. Single RWX PVC (goat-ducklake-data, from 05_minio.yml).
     - name: ducklake-data
       persistentVolumeClaim:
         claimName: goat-ducklake-data
@@ -264,8 +262,7 @@ processes:
     - name: cacert
       mountPath: /etc/ssl/cacert
       readOnly: true
-{% endif %}
-  # Chart default is `enabled: false`. Without a readiness gate the pod
+{% endif %}  # Chart default is `enabled: false`. Without a readiness gate the pod
   # is published in the EndpointSlice the moment the container starts,
   # so a service that crashes before binding :8000 still receives
   # traffic and ingress-nginx returns a bare 502 (ECONNREFUSED) rather
