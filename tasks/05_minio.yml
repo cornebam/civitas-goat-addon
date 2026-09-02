@@ -441,16 +441,27 @@
           app.kubernetes.io/managed-by: civitas-goat-addon
       data:
         init.py: |
-          """One-shot DuckLake catalog bootstrap. Runs from the `processes`
-          image so the catalog's on-disk format matches every runtime
-          attach."""
+          """One-shot DuckLake catalog bootstrap. Runs from the
+          `processes` image so LOAD hits the extensions baked into
+          DUCKDB_EXTENSION_DIRECTORY."""
 
           import os
           import duckdb
+          from goatlib.storage.ducklake import (
+              REQUIRED_DUCKDB_EXTENSIONS,
+              configure_baked_extensions,
+          )
 
           con = duckdb.connect()
-          for ext in ("spatial", "httpfs", "postgres", "ducklake"):
-              con.execute(f"INSTALL {ext}; LOAD {ext};")
+          if not configure_baked_extensions(con):
+              raise RuntimeError(
+                  "DUCKDB_EXTENSION_DIRECTORY unset — refusing to fall back to "
+                  "extensions.duckdb.org from a cluster Job."
+              )
+          print("extension_directory:",
+                con.execute("select current_setting('extension_directory')").fetchone()[0])
+          for ext in REQUIRED_DUCKDB_EXTENSIONS:
+              con.execute(f"LOAD {ext};")
 
           # DuckDB takes the endpoint as host[:port] and the scheme as a flag.
           endpoint = os.environ["S3_ENDPOINT"]

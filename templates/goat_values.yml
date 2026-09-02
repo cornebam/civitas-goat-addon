@@ -156,13 +156,17 @@ geoapi:
       configMap:
         name: cacert
         optional: true
-{% endif %}    # Shared DuckLake data dir: layer_import (worker-tools) writes parquet
-    # here, geoapi reads it for tile serving. Both pods must see the same
-    # files — hence a single RWX PVC (provisioned by tasks/07_ducklake_pvc.yml
-    # via inv_k8s.storage_class.rwx).
+{% endif %}    # Shared DuckLake data dir: worker-tools writes parquet, geoapi
+    # reads it. Single RWX PVC (goat-ducklake-data, from 05_minio.yml).
     - name: ducklake-data
       persistentVolumeClaim:
         claimName: goat-ducklake-data
+    # WORKAROUND (goatlib): masks the image's empty $HOME/.duckdb so
+    # the seed-duckdb-extensions initContainer's symlinks resolve.
+    # Remove once goatlib calls configure_baked_extensions() on every
+    # connection it opens.
+    - name: duckdb-home
+      emptyDir: {}
   extraVolumeMounts:
 {% if inv_k8s.ingress.ca_path is defined and inv_k8s.ingress.ca_path != "" %}
     - name: cacert
@@ -170,6 +174,8 @@ geoapi:
       readOnly: true
 {% endif %}    - name: ducklake-data
       mountPath: /app/data
+    - name: duckdb-home
+      mountPath: /home/appuser/.duckdb
   # Chart default is `enabled: false`. Without a readiness gate the pod
   # is published in the EndpointSlice the moment the container starts,
   # so a service that crashes before binding :8000 still receives
@@ -185,6 +191,39 @@ geoapi:
     periodSeconds: 10
     timeoutSeconds: 5
     failureThreshold: 3
+  # WORKAROUND (goatlib): _fetch_latest_snapshot_id opens a poll
+  # connection WITHOUT configure_baked_extensions() and issues
+  # `LOAD postgres`, which autoinstalls from extensions.duckdb.org.
+  # On egress-restricted clusters that blocks until TCP timeout,
+  # uvicorn exits 3 before binding :8000, and the ingress serves
+  # bare 502s. Symlink baked extensions from /opt/duckdb-extensions
+  # into DuckDB's default extension_directory so the unconfigured
+  # connection resolves them locally. Symlinks (not copies) share
+  # the ~180 MB across containers; init + main run the same image.
+  # Remove once goatlib calls configure_baked_extensions() on every
+  # connection it opens.
+  initContainers:
+    - name: seed-duckdb-extensions
+      image: "{{ software.addon_goat.images.geoapi.registry }}/{{ software.addon_goat.images.geoapi.repository }}:{{ software.addon_goat.images.geoapi.tag }}"
+      imagePullPolicy: "{{ software.addon_goat.images.geoapi.pullPolicy | default('Always') }}"
+      command:
+        - sh
+        - -c
+        - |
+          set -eu
+          SRC=/opt/duckdb-extensions
+          DST=/home/appuser/.duckdb/extensions
+          find "$SRC" -mindepth 2 -maxdepth 2 -type d | while read -r d; do
+            rel=${d#"$SRC"/}
+            mkdir -p "$DST/$rel"
+            for f in "$d"/*; do
+              ln -sfn "$f" "$DST/$rel/$(basename "$f")"
+            done
+          done
+          ls -la "$DST"/*/*/
+      volumeMounts:
+        - name: duckdb-home
+          mountPath: /home/appuser/.duckdb
   # geoapi at /geoapi. Path shape + prefix stripping come from the ingress
   # profile — regex `rewrite-target` on nginx, `stripPrefix` Middleware on
   # Traefik. geoapi emits absolute URLs from request.base_url (missing the
@@ -259,12 +298,16 @@ processes:
       configMap:
         name: cacert
         optional: true
-{% endif %}  extraVolumeMounts:
+{% endif %}    # See geoapi note — mask $HOME/.duckdb for the seed initContainer.
+    - name: duckdb-home
+      emptyDir: {}
+  extraVolumeMounts:
 {% if inv_k8s.ingress.ca_path is defined and inv_k8s.ingress.ca_path != "" %}
     - name: cacert
       mountPath: /etc/ssl/cacert
       readOnly: true
-{% endif %}
+{% endif %}    - name: duckdb-home
+      mountPath: /home/appuser/.duckdb
   # Chart default is `enabled: false`. Without a readiness gate the pod
   # is published in the EndpointSlice the moment the container starts,
   # so a service that crashes before binding :8000 still receives
@@ -280,6 +323,29 @@ processes:
     periodSeconds: 10
     timeoutSeconds: 5
     failureThreshold: 3
+  # See geoapi.initContainers — same WORKAROUND, `processes` image.
+  initContainers:
+    - name: seed-duckdb-extensions
+      image: "{{ software.addon_goat.images.processes.registry }}/{{ software.addon_goat.images.processes.repository }}:{{ software.addon_goat.images.processes.tag }}"
+      imagePullPolicy: "{{ software.addon_goat.images.processes.pullPolicy | default('Always') }}"
+      command:
+        - sh
+        - -c
+        - |
+          set -eu
+          SRC=/opt/duckdb-extensions
+          DST=/home/appuser/.duckdb/extensions
+          find "$SRC" -mindepth 2 -maxdepth 2 -type d | while read -r d; do
+            rel=${d#"$SRC"/}
+            mkdir -p "$DST/$rel"
+            for f in "$d"/*; do
+              ln -sfn "$f" "$DST/$rel/$(basename "$f")"
+            done
+          done
+          ls -la "$DST"/*/*/
+      volumeMounts:
+        - name: duckdb-home
+          mountPath: /home/appuser/.duckdb
   # processes at /processes. Same profile-driven prefix-strip pattern as
   # geoapi. Same absolute-URL caveat — the UI composes URLs itself from
   # NEXT_PUBLIC_PROCESSES_URL.
