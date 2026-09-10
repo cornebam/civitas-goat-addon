@@ -326,11 +326,15 @@
           for ext in ("spatial", "httpfs", "postgres", "ducklake"):
               con.execute(f"INSTALL {ext}; LOAD {ext};")
 
-          con.execute("SET s3_endpoint = ?;", [os.environ["S3_ENDPOINT"]])
+          # DuckDB takes the endpoint as host[:port] and the scheme as a flag.
+          endpoint = os.environ["S3_ENDPOINT"]
+          use_ssl = endpoint.startswith("https://")
+          host = endpoint.split("://", 1)[-1]
+          con.execute("SET s3_endpoint = ?;", [host])
           con.execute("SET s3_access_key_id = ?;", [os.environ["S3_KEY"]])
           con.execute("SET s3_secret_access_key = ?;", [os.environ["S3_SECRET"]])
           con.execute("SET s3_url_style = 'path';")
-          con.execute("SET s3_use_ssl = false;")
+          con.execute(f"SET s3_use_ssl = {'true' if use_ssl else 'false'};")
 
           pg_uri = (
               f"host={os.environ['PG_HOST']} port=5432 "

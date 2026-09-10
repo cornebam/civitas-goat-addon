@@ -6,7 +6,7 @@ inv_addons:
     namespace: "{{ ENVIRONMENT }}-goat-stack"
     chart:
       ref: "oci://ghcr.io/plan4better/charts/goat"
-      version: "0.3.2"
+      version: "0.4.1"
     db:
       # Postgres database names. Defaults match upstream conventions.
       # Override only if you need to co-tenant multiple goat installs in

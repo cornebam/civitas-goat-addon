@@ -11,7 +11,7 @@ This addon installs the GOAT Helm chart (`oci://ghcr.io/plan4better/charts/goat`
 - `goat` user/database provisioning in civitas's central-db
 - Keycloak `goat-web` OIDC client provisioning in the civitas realm (idempotent)
 - K8s Secret `goat-keycloak-creds` populated with `server-url`, `realm`, `client-id`, `client-secret`, `nextauth-secret`
-- Helm install of GOAT chart v0.3.0 with `core.auth.enabled: true` + `web.auth.enabled: true`
+- Helm install of GOAT chart v0.4.1 (GOAT v2.4.60) with `core.auth.enabled: true` + `web.auth.enabled: true`
 - APISIX routes `/goat/api/*` (OIDC-enforced) and `/goat/web/*` (passthrough — web handles its own login)
 - Readiness gate on `goat-core`
 
@@ -26,7 +26,7 @@ inv_addons:
     namespace: "{{ ENVIRONMENT }}-goat-stack"
     chart:
       ref: "oci://ghcr.io/plan4better/charts/goat"
-      version: "0.3.2"
+      version: "0.4.1"
     db:
       # Optional — Postgres database names. Defaults shown.
       # Override only if you need to co-tenant multiple goat installs in
