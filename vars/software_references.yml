@@ -14,7 +14,7 @@
 # references it, and nesting the shared value in the same dict as its
 # consumers triggers `recursive loop detected in template string` when
 # the whole dict is templated (e.g. from an assert).
-goat_release: "{{ inv_addons.goat.release | default('v2.4.60') }}"
+goat_release: "{{ inv_addons.goat.release | default('v3.0.2') }}"
 
 software:
   addon_goat:
