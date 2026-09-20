@@ -525,6 +525,7 @@
           app.kubernetes.io/managed-by: civitas-goat-addon
       spec:
         backoffLimit: 3
+        ttlSecondsAfterFinished: 60
         # Hard cap so the LOAD/INSTALL fallback can't hang when an
         # offline mirror is unreachable.
         activeDeadlineSeconds: 300
