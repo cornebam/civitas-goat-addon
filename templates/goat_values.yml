@@ -1,4 +1,4 @@
-# Rendered in-memory by tasks/templates/k8s-helm.yml (via 03_helm_install.yml)
+# Rendered in-memory by tasks/templates/k8s-helm.yml (via helm_install.yml)
 # and passed to `helm install` as a values file.
 #
 # Path map (all rooted on the ingress-host):
@@ -6,8 +6,8 @@
 #   /core        → goat-core      (API_V2_STR carries the prefix; no rewrite)
 #   /geoapi      → geoapi         (nginx rewrite / traefik middleware)
 #   /processes   → processes      (nginx rewrite / traefik middleware)
-#   /<bucket>    → MinIO (05_minio.yml) — MUST equal the bucket name for
-#                                         path-style SigV4; no rewrite.
+#   /<bucket>    → S3 gateway (s3_gateway.yml) — MUST equal the bucket
+#                                         name for path-style SigV4; no rewrite.
 #   (windmill: no public ingress — processes reaches it in-cluster only)
 {#- Derived values (hostname, TLS, S3 endpoints) come from vars/default.yml.
     s3_public_endpoint is always goat_public_url in both modes — the addon
@@ -15,7 +15,7 @@
     the browser origin equals the GOAT origin (no cross-origin surface). #}
 {%- set _s3 = goat_addon.s3 %}
 {%- set s3_provider = _s3.provider %}
-{%- set s3_internal_endpoint = goat_s3_internal_endpoint %}
+{%- set s3_internal_endpoint = goat_s3_endpoint %}
 {%- set s3_public_endpoint = goat_public_url %}
 {%- set s3_region = _s3.region %}
 {%- set s3_force_path_style_str = 'true' if _s3.force_path_style else 'false' %}
@@ -125,7 +125,7 @@ geoapi:
     # extraEnv (env beats envFrom) so `goat_addon.db.geoapi_host` can
     # point geoapi at a different endpoint than the rest of the stack.
     DUCKLAKE_CATALOG_SCHEMA: "ducklake"
-    # Must match the DATA_PATH used by ducklake-init in 05_minio.yml.
+    # Must match the DATA_PATH used by ducklake-init in ducklake.yml.
     # Parquet lives in S3; the local path is only the ATTACH marker.
     DUCKLAKE_DATA_DIR: "/app/data/ducklake"
     S3_PROVIDER: "{{ s3_provider }}"
@@ -134,7 +134,7 @@ geoapi:
     S3_BUCKET_NAME: "{{ goat_addon.s3.bucket }}"
   extraEnv:
 {% if inv_k8s.ingress.ca_path is defined and inv_k8s.ingress.ca_path != "" %}
-    # Only useful with the cacert ConfigMap from 00_namespace.yml —
+    # Only useful with the cacert ConfigMap from namespace.yml —
     # ACME-issued chains already validate against the OpenSSL default.
     - name: REQUESTS_CA_BUNDLE
       value: /etc/ssl/cacert/cacert.crt
@@ -157,7 +157,7 @@ geoapi:
         name: cacert
         optional: true
 {% endif %}    # Shared DuckLake data dir: worker-tools writes parquet, geoapi
-    # reads it. Single RWX PVC (goat-ducklake-data, from 05_minio.yml).
+    # reads it. Single RWX PVC (goat-ducklake-data, from ducklake.yml).
     - name: ducklake-data
       persistentVolumeClaim:
         claimName: goat-ducklake-data
@@ -219,7 +219,7 @@ processes:
     DUCKLAKE_DATA_DIR: "/app/data/ducklake"
     # processes declares both S3_* (boto3) and DUCKLAKE_S3_*
     # (goatlib DuckLake managers). Keep DUCKLAKE_S3_* here in sync
-    # with the ducklake-init Job env in 05_minio.yml.
+    # with the ducklake-init Job env in ducklake.yml.
     S3_PROVIDER: "{{ s3_provider }}"
     S3_ENDPOINT_URL: "{{ s3_internal_endpoint }}"
     S3_REGION: "{{ s3_region }}"
@@ -400,7 +400,7 @@ redis:
 
 # Windmill: server + four workers (default, tools, workflows, print).
 # Bootstrap (workspace + API token) is a chart post-install hook.
-# Windmill uses its own `windmill` database (01_db.yml) — it needs
+# Windmill uses its own `windmill` database (db.yml) — it needs
 # role-creation privileges the goat user doesn't have.
 windmill:
   db:

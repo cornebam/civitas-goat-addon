@@ -10,9 +10,9 @@ inv_addons:
       subdomain: "goat"
       # public_url: "https://goat.{{ DOMAIN }}"
     s3:
-      # in_cluster: addon-deployed single-replica MinIO.
-      # external:   existing S3-compatible endpoint (set endpoint + credentials).
-      mode: "in_cluster"
+      # provision: addon-deployed single-replica MinIO.
+      # attach:    existing S3-compatible endpoint (set endpoint + credentials).
+      mode: "provision"
       endpoint: ""
       access_key: ""
       secret_key: ""

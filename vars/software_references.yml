@@ -76,7 +76,7 @@ software:
         tag: "8.0.2"
         pullPolicy: IfNotPresent
 
-      # Addon-deployed (05_minio.yml), not via the chart.
+      # Addon-deployed (s3_provision.yml), not via the chart.
       minio:
         registry: quay.io
         repository: minio/minio

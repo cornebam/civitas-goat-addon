@@ -1,4 +1,3 @@
-# /home/p4b/civitas-goat-addon/tasks/99_health_check.yml
 ---
 # We don't run an explicit `curl /api/healthz` inside the container because
 # the goat-core image is stripped to essentials and ships no curl/wget.

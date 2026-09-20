@@ -18,29 +18,44 @@
         that: inv_k8s.ingress_class in goat_addon.ingress.profiles
 
     - name: "GOAT addon: create namespace and mirror the civitas CA"
-      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/00_namespace.yml"
+      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/namespace.yml"
 
     - name: "GOAT addon: provision DB users (goat + windmill)"
-      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/01_db.yml"
+      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/db.yml"
 
-    # Certificate before the first Ingress so cert-manager can start the
-    # ACME order before MinIO's Ingress references `<ingress-host>-tls`.
+    # Certificate before the first Ingress (goat-s3, from s3_gateway.yml)
+    # so cert-manager can start the ACME order before anything references
+    # `<ingress-host>-tls`.
     - name: "GOAT addon: provision explicit TLS Certificate"
-      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/06_certificate.yml"
+      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/certificate.yml"
 
-    - name: "GOAT addon: deploy object storage (MinIO) + DuckLake volume"
-      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/05_minio.yml"
+    - name: "GOAT addon: resolve S3 endpoint and credentials"
+      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/s3_resolve.yml"
+
+    # `import_tasks` (not include) so the `addons` tag reaches the
+    # children; the `when:` copies onto every task in the file.
+    - name: "GOAT addon: provision in-cluster MinIO"
+      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/s3_provision.yml"
+      when: goat_addon.s3.mode == 'provision'
+
+    - name: "GOAT addon: publish the /<bucket> S3 gateway ingress"
+      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/s3_gateway.yml"
+
+    # Last S3 consumer: the bootstrap Job needs the resolved endpoint,
+    # the credentials Secret and (in provision mode) the created bucket.
+    - name: "GOAT addon: DuckLake volume and catalog bootstrap"
+      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/ducklake.yml"
 
     - name: "GOAT addon: register Keycloak client"
-      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/02_keycloak_client.yml"
+      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/keycloak_client.yml"
 
     - name: "GOAT addon: helm install"
-      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/03_helm_install.yml"
+      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/helm_install.yml"
 
     # Traefik-only stripPrefix Middleware CRDs. `include_tasks` so the
     # `when:` gate short-circuits the file load on other controllers.
     - name: "GOAT addon: Traefik-only — create stripPrefix Middleware CRDs"
-      ansible.builtin.include_tasks: "{{ addon_dir | default('') }}tasks/04_ingress_middleware.yml"
+      ansible.builtin.include_tasks: "{{ addon_dir | default('') }}tasks/ingress_middleware.yml"
       when: inv_k8s.ingress_class == 'traefik'
 
     # Handled by the chart's own post-install hooks (no addon tasks):
@@ -50,4 +65,4 @@
     #   * alembic upgrade + initial_data
 
     - name: "GOAT addon: health check"
-      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/99_health_check.yml"
+      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/health_check.yml"
