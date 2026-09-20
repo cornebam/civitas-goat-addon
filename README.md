@@ -102,6 +102,12 @@ inv_addons:
       # geoapi_port: 5432
     keycloak:
       client_id: "goat-web"
+      # Optional login gate — see §Restricting login. Default: off.
+      limit_access: false
+      gate_role: "goat-user"
+      gate_group: "goat-users"
+      flow_alias: "goat-browser"
+      deny_message: "Ihr Benutzerkonto ist nicht für GOAT freigeschaltet. Bitte wenden Sie sich an Ihre Administration."
     ingress:
       # Traefik v2 clusters only — see "Supported ingress controllers".
       traefik_api_group: "traefik.io/v1alpha1"
@@ -199,6 +205,37 @@ Preconditions (attach mode asserts only that `endpoint`, `access_key` and `secre
 **DuckLake catalog binding.** The DuckLake catalog metadata (Postgres `ducklake.*` tables) stores the S3 endpoint written at bootstrap. Switching `endpoint` on an existing install leaves the catalog pointing at the old location; the addon's DuckLake init sets `AUTOMATIC_MIGRATION TRUE` on ATTACH which handles catalog *format* upgrades, but not endpoint relocation. Treat endpoint changes as a re-bootstrap.
 
 **Cost of leftover state.** Switching from `provision` → `attach` does not delete the in-cluster MinIO Deployment/PVC/Service if they already exist from a prior run (the `goat-s3` Ingress exists in both modes and is updated in place). Delete manually (`kubectl -n <env>-goat-stack delete deploy,svc,pvc minio minio-data`) to reclaim the disk.
+
+### Restricting login (`keycloak.limit_access`)
+
+The addon supports two access modes:
+
+- **Open (default, `limit_access: false`).** Every user in the Keycloak realm can log into GOAT. GOAT's `POST /api/v2/organizations` has no authorization check, so any user can create an organization on first login. A GOAT user belongs to one organization. A self-created org blocks the user from being invited to a managed one, and deleting the org cascade-deletes the user.
+- **Gated (`limit_access: true`).** For deployments with a single managed organization. The addon provisions a client role (`gate_role`) on the GOAT client, a group (`gate_group`) with that role mapped, and a dedicated browser flow (`flow_alias`) bound to the client. Users outside the group cannot authenticate against GOAT and see `deny_message`. Other realm clients are unaffected.
+
+```yaml
+inv_addons:
+  goat:
+    keycloak:
+      limit_access: true
+```
+
+Notes and caveats:
+
+1. **The group starts empty.** The addon creates the group but does not manage membership. Add users in the Keycloak admin console. Until the first member is added, nobody can log into GOAT, including the intended org owner.
+2. **Custom browser flows are not carried over.** The gate flow is built from scratch (Cookie, Identity Provider Redirector, Organization, username/password form, gate). Customisations in the realm's default browser flow (OTP, WebAuthn, custom authenticators) are absent from the gate flow and must be re-added manually.
+3. **Disabling leaves state behind.** Setting `limit_access: false` only unbinds the flow from the client. Role, group and flow stay in the realm. The group then looks like it controls GOAT access but does not. Delete manually if needed.
+4. **The flow is created once.** Later changes to `deny_message` or `gate_role` do not propagate into an existing flow. Edit it in Keycloak or delete the flow and re-run the playbook.
+
+**Onboarding runbook (gate on).** Order matters:
+
+1. Invite the user in GOAT by email (as org admin, via the GOAT UI).
+2. Add the user to the gate group in Keycloak.
+3. The user logs in and accepts the invitation.
+
+Invite first. A user who logs in without a pending invitation is prompted to create an own organization, which cannot be undone without deleting the user (see open mode above).
+
+**Offboarding runbook.** Removing a user from the gate group does not end active sessions. The gate runs at authentication time only. Remove the user from the group and sign out their sessions in Keycloak (user, Sessions, Sign out).
 
 ## How to use
 

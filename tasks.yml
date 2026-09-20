@@ -46,8 +46,8 @@
     - name: "GOAT addon: DuckLake volume and catalog bootstrap"
       ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/ducklake.yml"
 
-    - name: "GOAT addon: register Keycloak client"
-      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/keycloak_client.yml"
+    - name: "GOAT addon: configure Keycloak client"
+      ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/keycloak.yml"
 
     - name: "GOAT addon: helm install"
       ansible.builtin.import_tasks: "{{ addon_dir | default('') }}tasks/helm_install.yml"
