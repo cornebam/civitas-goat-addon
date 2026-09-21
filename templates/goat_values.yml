@@ -24,7 +24,7 @@ global:
   Image refs are sourced from vars/software_references.yml so civitas-core's
   image-mirror tooling can enumerate and pre-mirror every image this addon
   spins up. Override `registry:` in the inventory's
-  `goat_addon_software.images.<svc>` block to point at a private mirror.
+  `software.addon_goat.images.<svc>` block to point at a private mirror.
 
   The macro renders an `image:` block already indented to be a 2-space
   child of a top-level chart key (core, web, geoapi, etc.); usage:
@@ -35,10 +35,10 @@ global:
 #}
 {%- macro img(svc) -%}
 image:
-    registry: "{{ goat_addon_software.images[svc].registry }}"
-    repository: "{{ goat_addon_software.images[svc].repository }}"
-    tag: "{{ goat_addon_software.images[svc].tag }}"
-    pullPolicy: "{{ goat_addon_software.images[svc].pullPolicy | default('IfNotPresent') }}"
+    registry: "{{ software.addon_goat.images[svc].registry }}"
+    repository: "{{ software.addon_goat.images[svc].repository }}"
+    tag: "{{ software.addon_goat.images[svc].tag }}"
+    pullPolicy: "{{ software.addon_goat.images[svc].pullPolicy | default('Always') }}"
 {%- endmacro %}
 
 core:
@@ -332,9 +332,9 @@ redis:
   # Bitnami's free images moved to `bitnamilegacy` registry in Aug 2025;
   # reference goes through software_references.yml for mirror-friendliness.
   image:
-    registry: "{{ goat_addon_software.images.redis.registry }}"
-    repository: "{{ goat_addon_software.images.redis.repository }}"
-    tag: "{{ goat_addon_software.images.redis.tag }}"
+    registry: "{{ software.addon_goat.images.redis.registry }}"
+    repository: "{{ software.addon_goat.images.redis.repository }}"
+    tag: "{{ software.addon_goat.images.redis.tag }}"
 
 # Windmill: server + four workers (default, tools, workflows, print). The
 # chart's default `nodeSelector: { server-usage: geodata }` on tools/workflows
@@ -362,10 +362,10 @@ windmill:
   server:
     enabled: true
     image:
-      registry: "{{ goat_addon_software.images.windmill_server.registry }}"
-      repository: "{{ goat_addon_software.images.windmill_server.repository }}"
-      tag: "{{ goat_addon_software.images.windmill_server.tag }}"
-      pullPolicy: "{{ goat_addon_software.images.windmill_server.pullPolicy | default('IfNotPresent') }}"
+      registry: "{{ software.addon_goat.images.windmill_server.registry }}"
+      repository: "{{ software.addon_goat.images.windmill_server.repository }}"
+      tag: "{{ software.addon_goat.images.windmill_server.tag }}"
+      pullPolicy: "{{ software.addon_goat.images.windmill_server.pullPolicy | default('Always') }}"
     # BASE_URL drives windmill's outbound links (emails, webhooks, the
     # `Open in Windmill` button). Set it to the public URL so links work
     # outside the cluster.
@@ -398,20 +398,20 @@ windmill:
     default:
       enabled: true
       image:
-        registry: "{{ goat_addon_software.images.windmill_worker_default.registry }}"
-        repository: "{{ goat_addon_software.images.windmill_worker_default.repository }}"
-        tag: "{{ goat_addon_software.images.windmill_worker_default.tag }}"
-        pullPolicy: "{{ goat_addon_software.images.windmill_worker_default.pullPolicy | default('IfNotPresent') }}"
+        registry: "{{ software.addon_goat.images.windmill_worker_default.registry }}"
+        repository: "{{ software.addon_goat.images.windmill_worker_default.repository }}"
+        tag: "{{ software.addon_goat.images.windmill_worker_default.tag }}"
+        pullPolicy: "{{ software.addon_goat.images.windmill_worker_default.pullPolicy | default('Always') }}"
     # `tools` and `workflows` share the windmill-worker-tools image — heavier
     # (goatlib + geospatial deps). They run python scripts that import
     # goatlib, which the default worker image doesn't ship.
     tools:
       enabled: true
       image:
-        registry: "{{ goat_addon_software.images.windmill_worker_tools.registry }}"
-        repository: "{{ goat_addon_software.images.windmill_worker_tools.repository }}"
-        tag: "{{ goat_addon_software.images.windmill_worker_tools.tag }}"
-        pullPolicy: "{{ goat_addon_software.images.windmill_worker_tools.pullPolicy | default('IfNotPresent') }}"
+        registry: "{{ software.addon_goat.images.windmill_worker_tools.registry }}"
+        repository: "{{ software.addon_goat.images.windmill_worker_tools.repository }}"
+        tag: "{{ software.addon_goat.images.windmill_worker_tools.tag }}"
+        pullPolicy: "{{ software.addon_goat.images.windmill_worker_tools.pullPolicy | default('Always') }}"
       # Override chart default `node.kubernetes.io/server-usage: geodata`
       # which civitas's local clusters don't carry.
       nodeSelector: {}
@@ -455,10 +455,10 @@ windmill:
     workflows:
       enabled: true
       image:
-        registry: "{{ goat_addon_software.images.windmill_worker_tools.registry }}"
-        repository: "{{ goat_addon_software.images.windmill_worker_tools.repository }}"
-        tag: "{{ goat_addon_software.images.windmill_worker_tools.tag }}"
-        pullPolicy: "{{ goat_addon_software.images.windmill_worker_tools.pullPolicy | default('IfNotPresent') }}"
+        registry: "{{ software.addon_goat.images.windmill_worker_tools.registry }}"
+        repository: "{{ software.addon_goat.images.windmill_worker_tools.repository }}"
+        tag: "{{ software.addon_goat.images.windmill_worker_tools.tag }}"
+        pullPolicy: "{{ software.addon_goat.images.windmill_worker_tools.pullPolicy | default('Always') }}"
       nodeSelector: {}
       tolerations: []
       persistence:
@@ -496,10 +496,10 @@ windmill:
     print:
       enabled: true
       image:
-        registry: "{{ goat_addon_software.images.windmill_worker_print.registry }}"
-        repository: "{{ goat_addon_software.images.windmill_worker_print.repository }}"
-        tag: "{{ goat_addon_software.images.windmill_worker_print.tag }}"
-        pullPolicy: "{{ goat_addon_software.images.windmill_worker_print.pullPolicy | default('IfNotPresent') }}"
+        registry: "{{ software.addon_goat.images.windmill_worker_print.registry }}"
+        repository: "{{ software.addon_goat.images.windmill_worker_print.repository }}"
+        tag: "{{ software.addon_goat.images.windmill_worker_print.tag }}"
+        pullPolicy: "{{ software.addon_goat.images.windmill_worker_print.pullPolicy | default('Always') }}"
       nodeSelector: {}
 
 caddy:

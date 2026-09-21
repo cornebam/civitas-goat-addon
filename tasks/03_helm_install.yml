@@ -15,8 +15,8 @@
 - name: "[Helm] Create the GOAT installation"
   ansible.builtin.include_tasks: tasks/templates/k8s-helm.yml
   vars:
-    helm_chart_name: "{{ goat_addon_software.helm_chart_name }}"
-    helm_release_name: "{{ goat_addon_software.helm_release_name }}"
+    helm_chart_name: "{{ software.addon_goat.helm_chart_name }}"
+    helm_release_name: "{{ software.addon_goat.helm_release_name }}"
     helm_chart_reference: "{{ goat_addon.chart.ref }}"
     helm_chart_version: "{{ goat_addon.chart.version }}"
     helm_values_file: "{{ addon_dir | default('') }}templates/goat_values.yml"
