@@ -59,14 +59,20 @@ software:
         pullPolicy: IfNotPresent
       # Shared by `tools` and `workflows` worker pods.
       windmill_worker_tools:
-        registry: ghcr.io
-        repository: plan4better/goat/windmill-worker-tools
-        tag: "{{ goat_release }}"
+        # registry: ghcr.io
+        # repository: plan4better/goat/windmill-worker-tools
+        # tag: "{{ goat_release }}"
+        registry: registry.gitlab.com
+        repository: cornelius.kirchhoff/goat-fix/windmill-worker-tools
+        tag: "v3.0.2-cache.1"
         pullPolicy: IfNotPresent
       windmill_worker_print:
-        registry: ghcr.io
-        repository: plan4better/goat/windmill-worker-print
-        tag: "{{ goat_release }}"
+        # registry: ghcr.io
+        # repository: plan4better/goat/windmill-worker-print
+        # tag: "{{ goat_release }}"
+        registry: registry.gitlab.com
+        repository: cornelius.kirchhoff/goat-fix/windmill-worker-print
+        tag: "v3.0.2-cache.1"
         pullPolicy: IfNotPresent
 
       # Free Bitnami images moved to bitnamilegacy in Aug 2025.
