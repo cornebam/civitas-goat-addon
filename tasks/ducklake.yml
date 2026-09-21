@@ -94,6 +94,9 @@
           con.execute(f"SET s3_url_style = '{url_style}';")
           use_ssl = os.environ.get("S3_USE_SSL", "false").lower() == "true"
           con.execute(f"SET s3_use_ssl = {'true' if use_ssl else 'false'};")
+          ca_bundle = os.environ.get("S3_CA_BUNDLE_PATH", "")
+          if ca_bundle:
+              con.execute(f"SET s3_ca_bundle_path = '{ca_bundle}';")
 
           pg_uri = (
               f"host={os.environ['PG_HOST']} port={os.environ.get('PG_PORT', '5432')} "
@@ -131,6 +134,18 @@
     wait: true
 
 - name: "GOAT addon: bootstrap DuckLake catalog one-shot"
+  vars:
+    _ca_env: "{{ [
+        {'name': 'AWS_CA_BUNDLE', 'value': '/etc/ssl/cacert/cacert.crt'},
+        {'name': 'CURL_CA_BUNDLE', 'value': '/etc/ssl/cacert/cacert.crt'},
+        {'name': 'S3_CA_BUNDLE_PATH', 'value': '/etc/ssl/cacert/cacert.crt'},
+      ] if goat_addon.s3.customCACert != '' else [] }}"
+    _ca_volume_mount: "{{ [
+        {'name': 'cacert', 'mountPath': '/etc/ssl/cacert', 'readOnly': True},
+      ] if goat_addon.s3.customCACert != '' else [] }}"
+    _ca_volume: "{{ [
+        {'name': 'cacert', 'configMap': {'name': 'cacert', 'optional': True}},
+      ] if goat_addon.s3.customCACert != '' else [] }}"
   kubernetes.core.k8s:
     kubeconfig: "{{ k8s_config }}"
     context: "{{ k8s_context }}"
@@ -156,51 +171,31 @@
               - name: init
                 image: "{{ software.addon_goat.images.processes.registry }}/{{ software.addon_goat.images.processes.repository }}:{{ software.addon_goat.images.processes.tag }}"
                 imagePullPolicy: "{{ software.addon_goat.images.processes.pullPolicy | default('IfNotPresent') }}"
-                env:
-                  - name: PG_HOST
-                    value: "{{ goat_addon.db.host }}"
-                  - name: PG_PORT
-                    value: "{{ goat_addon.db.port }}"
-                  - name: PG_USER
-                    valueFrom:
-                      secretKeyRef: { name: goat-postgres-creds, key: username }
-                  - name: PG_PASS
-                    valueFrom:
-                      secretKeyRef: { name: goat-postgres-creds, key: password }
-                  - name: PG_DB
-                    value: "{{ goat_addon.db.goat_db_name }}"
-                  - name: S3_ENDPOINT
-                    value: "{{ goat_s3_endpoint_hostport }}"
-                  - name: S3_USE_SSL
-                    # `| string` blocks jinja2-native from coercing back
-                    # to bool and serializing as JSON `true` (fails K8s
-                    # EnvVar validation).
-                    value: "{{ goat_s3_use_ssl | string }}"
-                  - name: S3_URL_STYLE
-                    value: "{{ goat_s3_url_style }}"
-                  - name: S3_KEY
-                    valueFrom:
-                      secretKeyRef: { name: goat-s3-credentials, key: access_key }
-                  - name: S3_SECRET
-                    valueFrom:
-                      secretKeyRef: { name: goat-s3-credentials, key: secret_key }
-                  - name: BUCKET
-                    value: "{{ goat_addon.s3.bucket }}"
-                  - name: SCHEMA
-                    value: "ducklake"
+                env: "{{ [
+                    {'name': 'PG_HOST', 'value': goat_addon.db.host},
+                    {'name': 'PG_PORT', 'value': goat_addon.db.port | string},
+                    {'name': 'PG_USER', 'valueFrom': {'secretKeyRef': {'name': 'goat-postgres-creds', 'key': 'username'}}},
+                    {'name': 'PG_PASS', 'valueFrom': {'secretKeyRef': {'name': 'goat-postgres-creds', 'key': 'password'}}},
+                    {'name': 'PG_DB', 'value': goat_addon.db.goat_db_name},
+                    {'name': 'S3_ENDPOINT', 'value': goat_s3_endpoint_hostport},
+                    {'name': 'S3_USE_SSL', 'value': goat_s3_use_ssl | string},
+                    {'name': 'S3_URL_STYLE', 'value': goat_s3_url_style},
+                    {'name': 'S3_KEY', 'valueFrom': {'secretKeyRef': {'name': 'goat-s3-credentials', 'key': 'access_key'}}},
+                    {'name': 'S3_SECRET', 'valueFrom': {'secretKeyRef': {'name': 'goat-s3-credentials', 'key': 'secret_key'}}},
+                    {'name': 'BUCKET', 'value': goat_addon.s3.bucket},
+                    {'name': 'SCHEMA', 'value': 'ducklake'},
+                  ] + _ca_env }}"
                 # Explicit venv interpreter. The processes image builds
                 # into /venv (UV_PROJECT_ENVIRONMENT). Bare `python`
                 # may resolve to a system interpreter without duckdb.
                 command: ["/venv/bin/python"]
                 args: ["/scripts/init.py"]
-                volumeMounts:
-                  - name: script
-                    mountPath: /scripts
-                    readOnly: true
-            volumes:
-              - name: script
-                configMap:
-                  name: ducklake-init-script
+                volumeMounts: "{{ [
+                    {'name': 'script', 'mountPath': '/scripts', 'readOnly': True},
+                  ] + _ca_volume_mount }}"
+            volumes: "{{ [
+                {'name': 'script', 'configMap': {'name': 'ducklake-init-script'}},
+              ] + _ca_volume }}"
 
 - name: "GOAT addon: wait for DuckLake bootstrap Job"
   kubernetes.core.k8s_info:

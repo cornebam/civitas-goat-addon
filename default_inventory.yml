@@ -16,6 +16,7 @@ inv_addons:
       endpoint: ""
       access_key: ""
       secret_key: ""
+      # customCACert: "{{ inventory_dir }}/s3-ca.pem"
       # bucket: "goat"
       # region: "us-east-1"
       # proxy:

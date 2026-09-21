@@ -63,6 +63,10 @@ goat_addon:
     # The addon writes them into `goat-s3-credentials`.
     access_key: "{{ inv_addons.goat.s3.access_key | default('') }}"
     secret_key: "{{ inv_addons.goat.s3.secret_key | default('') }}"
+    # Optional PEM on the Ansible controller. Concatenated with
+    # inv_k8s.ingress.ca_path into the cacert ConfigMap and consumed
+    # by every pod-side S3 client via AWS_CA_BUNDLE and CURL_CA_BUNDLE.
+    customCACert: "{{ inv_addons.goat.s3.customCACert | default('') }}"
     region: "{{ inv_addons.goat.s3.region | default('us-east-1') }}"
     # Tunables for the `/<bucket>` passthrough Ingress (s3_gateway.yml).
     proxy:

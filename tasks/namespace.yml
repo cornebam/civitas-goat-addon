@@ -13,11 +13,11 @@
   ansible.builtin.include_tasks: tasks/templates/k8s-namespace.yml
   when: goat_addon.ns_create | bool
 
-# NextAuth (goat-web) makes server-side OIDC calls to Keycloak. On
-# private-CA clusters Node.js rejects the cert with
-# UNABLE_TO_VERIFY_LEAF_SIGNATURE. Mirror the civitas CA bundle into
-# the namespace and mount it via NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE
-# and SSL_CERT_FILE in goat_values.yml.
+# Two sources feed one ConfigMap so pods carry a single trust bundle.
+# inv_k8s.ingress.ca_path is the ingress and Keycloak cert (NextAuth,
+# REQUESTS_CA_BUNDLE, SSL_CERT_FILE). goat_addon.s3.customCACert is the
+# external S3 endpoint cert (boto3, DuckDB httpfs) for attach-mode S3
+# behind a private CA.
 - name: GOAT addon create cacert ConfigMap
   kubernetes.core.k8s:
     kubeconfig: "{{ k8s_config }}"
@@ -31,5 +31,10 @@
         namespace: "{{ k8s_namespace }}"
       data:
         cacert.crt: |
+          {% if (inv_k8s.ingress.ca_path | default('')) != '' -%}
           {{ lookup('file', inv_k8s.ingress.ca_path) }}
-  when: inv_k8s.ingress.ca_path is defined and inv_k8s.ingress.ca_path != ""
+          {% endif -%}
+          {% if (goat_addon.s3.customCACert | default('')) != '' -%}
+          {{ lookup('file', goat_addon.s3.customCACert) }}
+          {% endif -%}
+  when: (inv_k8s.ingress.ca_path | default('')) != '' or (goat_addon.s3.customCACert | default('')) != ''
