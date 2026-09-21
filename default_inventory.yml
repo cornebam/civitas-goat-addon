@@ -42,6 +42,13 @@ inv_addons:
     #   geoapi_port: 5432
     # keycloak:
     #   client_id: "goat-web"
+    #   # Login gate. Only members of the gate group can log in.
+    #   # See README §Restricting login. Default off.
+    #   limit_access: false
+    #   gate_role: "goat-user"
+    #   gate_group: "goat-users"
+    #   flow_alias: "goat-browser"
+    #   deny_message: "Ihr Benutzerkonto ist nicht für GOAT freigeschaltet. Bitte wenden Sie sich an Ihre Administration."
     # ducklake:
     #   pvc_size: "20Gi"
     #   pvc_access_mode: "ReadWriteOnce"
